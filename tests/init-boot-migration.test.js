@@ -828,8 +828,15 @@ describe('SSE parser — updateApiRequest direct import', () => {
 
 // ════════════════════════════════════════════════════════════════════
 // L.  _temp_repo vs IPC Parity — cross-verification
+//     Skipped in CI (no _temp_repo directory)
 // ════════════════════════════════════════════════════════════════════
-describe('Cross-verification: _temp_repo/init.js parity', () => {
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+const hasTempRepo = existsSync(resolve('../_temp_repo/src/lib/init.js'));
+
+const describeIfTempRepo = hasTempRepo ? describe : describe.skip;
+
+describeIfTempRepo('Cross-verification: _temp_repo/init.js parity', () => {
     it('IPC boot has all _temp_repo boot phases', async () => {
         const fs = await import('node:fs');
         const path = await import('node:path');
