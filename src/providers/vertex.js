@@ -356,7 +356,7 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
                     parts: content.parts.map(part => {
                         const { thought, ...rest } = part;
                         return rest;
-                    }),
+                    }).filter(p => Object.keys(p).length > 0),
                 }));
             }
 
