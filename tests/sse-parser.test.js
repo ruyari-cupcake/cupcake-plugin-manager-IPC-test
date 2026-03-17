@@ -1,7 +1,7 @@
 /**
  * @file sse-parser.test.js — SSE 파싱 유틸리티 테스트
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
     ThoughtSignatureCache,
     parseOpenAISSELine,

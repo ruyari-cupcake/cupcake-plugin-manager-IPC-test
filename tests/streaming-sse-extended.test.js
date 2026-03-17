@@ -5,7 +5,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
     createSSEStream,
-    createOpenAISSEStream,
     createAnthropicSSEStream,
     createResponsesAPISSEStream,
     parseGeminiSSELine,
@@ -110,7 +109,7 @@ describe('createSSEStream', () => {
 
         ac.abort();
         const stream = createSSEStream(response, parser, ac.signal, onComplete);
-        const result = await collectStream(stream);
+        const _result = await collectStream(stream);
         expect(onComplete).toHaveBeenCalled();
     });
 
@@ -127,7 +126,7 @@ describe('createSSEStream', () => {
     it('calls onComplete on cancel', async () => {
         const onComplete = vi.fn();
         const response = makeSSEResponse(['data: test']);
-        const parser = (line) => null;
+        const parser = (_line) => null;
         const stream = createSSEStream(response, parser, undefined, onComplete);
         const reader = stream.getReader();
         await reader.cancel();

@@ -1,7 +1,7 @@
 /**
  * @file ipc-protocol.test.js — IPC 프로토콜 정의 테스트
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { MANAGER_NAME, CH, MSG, safeUUID, getRisu, registerWithManager } from '../src/shared/ipc-protocol.js';
 
 describe('Constants', () => {

@@ -9,7 +9,6 @@
 import { describe, it, expect } from 'vitest';
 import {
     buf2hex,
-    encodeRfc3986,
     hmac,
     hash,
     guessServiceRegion,

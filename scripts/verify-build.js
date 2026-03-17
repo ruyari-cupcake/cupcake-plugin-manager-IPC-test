@@ -83,7 +83,7 @@ for (const fileName of EXPECTED_FILES) {
     check(lines.some(l => l.startsWith('//@version ')), `Has //@version metadata`);
 
     // Contains IIFE wrapper
-    check(content.includes('(function'), `Contains IIFE wrapper`);
+    check(content.includes('(function') || content.includes('!function'), `Contains IIFE wrapper`);
 
     console.log('');
 }

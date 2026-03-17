@@ -7,7 +7,7 @@
  *   - sse-parser.js (89.6% → 95%+): Anthropic redacted_thinking, SSE cancel handlers, error event
  *   - auto-updater.js (89.42% → 95%+): validateAndInstall arg parsing, @link directives, API version rejection
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mock ipc-protocol getRisu for helpers.js ──
 const mockRisu = {};
@@ -27,7 +27,6 @@ vi.mock('../src/shared/ipc-protocol.js', () => ({
 import {
     _stripNonSerializable,
     collectStream,
-    shouldEnableStreaming,
 } from '../src/shared/helpers.js';
 
 describe('helpers: _stripNonSerializable edge cases', () => {

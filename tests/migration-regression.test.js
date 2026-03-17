@@ -4,11 +4,11 @@
  * Regression tests for all 17 migration gaps applied to manager/index.js.
  * These tests verify the behavioral correctness of migrated _temp_repo logic.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 import { sanitizeMessages, hasNonEmptyMessageContent, hasAttachedMultimodals } from '../src/shared/sanitize.js';
-import { formatToAnthropic, formatToOpenAI, formatToGemini } from '../src/shared/message-format.js';
-import { getGeminiSafetySettings, buildGeminiThinkingConfig } from '../src/shared/gemini-helpers.js';
+import { formatToOpenAI } from '../src/shared/message-format.js';
+import { getGeminiSafetySettings } from '../src/shared/gemini-helpers.js';
 import {
     supportsOpenAIReasoningEffort,
     shouldStripOpenAISamplingParams,
@@ -139,7 +139,7 @@ describe('Gap #11: o-series param stripping', () => {
 describe('Gap #12: CORS proxy modes', () => {
     it('proxyDirect uses X-Target-URL', () => {
         const headers = {};
-        const proxyUrl = 'https://proxy.example.com';
+        const _proxyUrl = 'https://proxy.example.com';
         const targetUrl = 'https://api.openai.com/v1/chat/completions';
         headers['X-Target-URL'] = targetUrl;
         expect(headers['X-Target-URL']).toBe(targetUrl);

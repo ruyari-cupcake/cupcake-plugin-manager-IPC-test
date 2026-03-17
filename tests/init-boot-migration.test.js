@@ -10,12 +10,12 @@
  *   6. Streaming capability check during boot
  *   7. Custom model proxy diagnostic logging
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
     parseCustomModelsValue,
     normalizeCustomModel,
 } from '../src/shared/custom-model-serialization.js';
-import { safeGetArg, safeGetBoolArg, checkStreamCapability } from '../src/shared/helpers.js';
+import { checkStreamCapability } from '../src/shared/helpers.js';
 
 // ════════════════════════════════════════════════════════════════════
 // A.  Boot Order — Settings registration must precede model registration
@@ -396,11 +396,11 @@ describe('Phase tracking — boot phase diagnostics', () => {
     it('phase tracking simulation — success path', () => {
         const phases = [];
         const failed = [];
-        let current = 'pre-init';
+        let _current = 'pre-init';
 
-        const start = (p) => { current = p; };
+        const start = (p) => { _current = p; };
         const done = (p) => { phases.push(p); };
-        const fail = (p, e) => { failed.push(`${p}: ${e}`); };
+        const _fail = (p, e) => { failed.push(`${p}: ${e}`); };
 
         start('register-settings');
         done('register-settings');
@@ -481,8 +481,8 @@ describe('Event handler cleanup — double-fire prevention', () => {
 
         // Mock rootDoc
         const rootDoc = {
-            addEventListener: (evt, fn) => { added.push(evt); },
-            removeEventListener: (evt, fn) => { removed.push(evt); },
+            addEventListener: (evt, _fn) => { added.push(evt); },
+            removeEventListener: (evt, _fn) => { removed.push(evt); },
         };
 
         // First init

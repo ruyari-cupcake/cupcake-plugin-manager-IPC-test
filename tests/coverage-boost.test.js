@@ -8,7 +8,7 @@
  *  4. message-format.js — Anthropic merge + Gemini multimodal branches
  *  5. token-usage.js — legacy key fallback + explicit Anthropic reasoning tokens
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. auto-updater.js — checkVersionsQuiet + checkMainPluginVersionQuiet
@@ -772,7 +772,7 @@ describe('formatToOpenAI — uncovered branches', () => {
         // wav
         let msgs = [mkMsg('user', 'Audio', { multimodals: [{ type: 'audio', base64: 'data:audio/wav;base64,wavdata' }] })];
         let result = formatToOpenAI(msgs);
-        let userMsg = result.find(m => m.role === 'user');
+        const userMsg = result.find(m => m.role === 'user');
         expect(Array.isArray(userMsg.content)).toBe(true);
         let audioInput = userMsg.content.find(p => p.type === 'input_audio');
         expect(audioInput.input_audio.format).toBe('wav');

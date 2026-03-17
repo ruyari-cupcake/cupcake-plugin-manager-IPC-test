@@ -6,7 +6,7 @@
  * Note: The manager/index.js functions are tested indirectly through their exported behaviors;
  * we re-implement the pure utility functions for unit testing.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // ═══════════════════════════════════════
 // RETRY UTILITIES (same logic as manager/index.js)
@@ -227,7 +227,7 @@ describe('_executeWithRetry', () => {
 
     it('does not retry on 524', async () => {
         let calls = 0;
-        const result = await _executeWithRetry(async () => {
+        const _result = await _executeWithRetry(async () => {
             calls++;
             return { ok: false, status: 524, headers: new Headers() };
         }, 'test', 3);
@@ -237,7 +237,7 @@ describe('_executeWithRetry', () => {
     it('stops retrying if abortSignal is aborted', async () => {
         const controller = new AbortController();
         let calls = 0;
-        const result = await _executeWithRetry(async () => {
+        const _result = await _executeWithRetry(async () => {
             calls++;
             if (calls === 1) {
                 controller.abort();
@@ -261,7 +261,7 @@ describe('_executeWithRetry', () => {
 
     it('uses maxAttempts=1 to disable retry', async () => {
         let calls = 0;
-        const result = await _executeWithRetry(async () => {
+        const _result = await _executeWithRetry(async () => {
             calls++;
             return { ok: false, status: 500, headers: new Headers() };
         }, 'test', 1);
@@ -280,7 +280,7 @@ describe('_executeWithRetry', () => {
 
     it('handles response without status', async () => {
         let calls = 0;
-        const result = await _executeWithRetry(async () => {
+        const _result = await _executeWithRetry(async () => {
             calls++;
             return { ok: false };
         }, 'test', 2);
@@ -624,7 +624,7 @@ describe('Copilot CORS proxy auth passthrough', () => {
         const headers = { 'Content-Type': 'application/json' };
 
         if (_isProxied && isCopilotUrl) {
-            let proxiedCopilotToken = apiKey;
+            const proxiedCopilotToken = apiKey;
             if (proxiedCopilotToken) {
                 headers['Authorization'] = `Bearer ${proxiedCopilotToken}`;
             }

@@ -6,7 +6,7 @@
  * 2. Branch coverage gaps in shared modules
  * 3. Edge cases from _temp_repo that weren't ported
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
 // ============================================================
 // § 1. sanitize.js — sanitizeBodyJSON + hasNonEmptyMessageContent edge cases
@@ -16,8 +16,6 @@ import {
     sanitizeBodyJSON,
     hasNonEmptyMessageContent,
     hasAttachedMultimodals,
-    stripInternalTags,
-    stripStaleAutoCaption,
     extractNormalizedMessagePayload,
     stripThoughtDisplayContent,
 } from '../src/shared/sanitize.js';
@@ -259,7 +257,7 @@ describe('message-format — migration gap coverage', () => {
                 { role: 'system', content: 'Be helpful' },
                 { role: 'user', content: 'Hi' },
             ];
-            const { systemInstruction, contents } = formatToGemini(messages, { preserveSystem: true });
+            const { systemInstruction, contents: _contents } = formatToGemini(messages, { preserveSystem: true });
             expect(systemInstruction).toContain('Be helpful');
         });
 
@@ -354,7 +352,7 @@ describe('key-pool — migration gap coverage', () => {
         it('returns immediately for non-retryable status (e.g. 400)', async () => {
             const pool = new KeyPool('bad1 good1');
             let callCount = 0;
-            const result = await pool.withRotation(async (key) => {
+            const result = await pool.withRotation(async (_key) => {
                 callCount++;
                 return { success: false, content: 'bad request', _status: 400 };
             });
@@ -365,7 +363,7 @@ describe('key-pool — migration gap coverage', () => {
         it('returns success immediately without retrying', async () => {
             const pool = new KeyPool('good1 good2');
             let callCount = 0;
-            const result = await pool.withRotation(async (key) => {
+            const result = await pool.withRotation(async (_key) => {
                 callCount++;
                 return { success: true, content: 'ok' };
             });
@@ -386,7 +384,7 @@ describe('key-pool — migration gap coverage', () => {
 // ============================================================
 // § 4. slot-inference.js — scoring + collision
 // ============================================================
-import { inferSlot, scoreSlotHeuristic, CPM_SLOT_LIST } from '../src/shared/slot-inference.js';
+import { inferSlot, scoreSlotHeuristic } from '../src/shared/slot-inference.js';
 
 describe('slot-inference — migration gap coverage', () => {
     // inferSlot requires { safeGetArg } as an async dependency function
@@ -500,7 +498,7 @@ describe('token-usage — migration gap coverage', () => {
             _setTokenUsage(`eviction-${i}`, { input: i, output: i });
         }
         // Early entries should be evicted
-        const earlyResult = _takeTokenUsage('eviction-0');
+        const _earlyResult = _takeTokenUsage('eviction-0');
         // Either evicted (undefined) or still there if max > 150
         // The test validates the eviction mechanism works without throwing
     });
@@ -511,7 +509,6 @@ describe('token-usage — migration gap coverage', () => {
 // ============================================================
 import {
     supportsOpenAIReasoningEffort,
-    supportsOpenAIVerbosity,
     needsCopilotResponsesAPI,
     shouldStripOpenAISamplingParams,
     shouldStripGPT54SamplingForReasoning,
@@ -807,10 +804,6 @@ describe('dynamic-models — migration gap coverage', () => {
 // § 10. sse-parser.js — Anthropic cancel handler, Gemini finalization
 // ============================================================
 import {
-    createSSEStream,
-    createOpenAISSEStream,
-    createAnthropicSSEStream,
-    createResponsesAPISSEStream,
     parseGeminiSSELine,
     parseGeminiNonStreamingResponse,
     parseClaudeNonStreamingResponse,
@@ -1043,10 +1036,8 @@ describe('custom-model-serialization — migration gap coverage', () => {
 // ============================================================
 import {
     normalizeCopilotNodelessMode,
-    shouldUseNodelessTokenHeaders,
     shouldUseLegacyCopilotRequestHeaders,
     getCopilotStaticHeaders,
-    buildCopilotTokenExchangeHeaders,
 } from '../src/shared/copilot-headers.js';
 
 describe('copilot-headers — migration gap completeness', () => {
@@ -1082,7 +1073,7 @@ describe('copilot-headers — migration gap completeness', () => {
 // ============================================================
 // § 14. ipc-protocol.js — edge branches
 // ============================================================
-import { MANAGER_NAME, CH, MSG, safeUUID, getRisu as getIpcRisu } from '../src/shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, safeUUID, getRisu as _getIpcRisu } from '../src/shared/ipc-protocol.js';
 
 describe('ipc-protocol — migration gap coverage', () => {
     it('exports valid channel constants', () => {

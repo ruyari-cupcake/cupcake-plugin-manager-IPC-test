@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { setupChannelCleanup, CH, MSG, safeUUID, getRisu, MANAGER_NAME } from '../src/shared/ipc-protocol.js';
+import { setupChannelCleanup, CH, MSG, safeUUID, MANAGER_NAME } from '../src/shared/ipc-protocol.js';
 
 describe('setupChannelCleanup', () => {
     it('registers onUnload callback that replaces channel listeners with no-ops', () => {

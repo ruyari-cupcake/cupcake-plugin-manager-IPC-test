@@ -1,5 +1,5 @@
 // @ts-check
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { safeSetDatabaseLite, validateDbPatch } from '../src/shared/safe-db-writer.js';
 import { createAutoUpdater, _withTimeout, compareVersions } from '../src/shared/auto-updater.js';
 import { setupChannelCleanup, CH, MSG, MANAGER_NAME } from '../src/shared/ipc-protocol.js';
@@ -90,7 +90,7 @@ describe('auto-updater + safe-db-writer integration', () => {
             validateSchema: vi.fn(),
         });
 
-        const result = await updater.safeMainPluginUpdate();
+        const _result = await updater.safeMainPluginUpdate();
 
         // setDatabaseLite가 호출되었는지 확인
         expect(Risu.setDatabaseLite).toHaveBeenCalledTimes(1);

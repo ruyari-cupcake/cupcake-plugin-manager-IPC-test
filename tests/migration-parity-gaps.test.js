@@ -114,7 +114,7 @@ describe('GAP-3: KeyPool.withRotation — exhaustion recovery', () => {
 // temp_repo races in-flight fetches against the abort signal.
 // IPC must also observe abort during in-flight requests, not just pre-flight.
 // ═══════════════════════════════════════
-import { smartFetch, streamingFetch } from '../src/shared/helpers.js';
+import { smartFetch } from '../src/shared/helpers.js';
 
 describe('GAP-4: smartFetch mid-flight abort monitoring', () => {
     beforeEach(() => {

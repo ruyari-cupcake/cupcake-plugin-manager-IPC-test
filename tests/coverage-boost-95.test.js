@@ -9,7 +9,7 @@
  *   - sse-parser.js (89.6% → 95%+)
  *   - auto-updater.js (88.5% → 95%+)
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // ──────────────────────────────────────────────
 // 1. update-toast.js — showMainAutoUpdateResult
@@ -191,7 +191,6 @@ describe('update-toast: showMainAutoUpdateResult', () => {
 // 2. model-helpers.js — uncovered branches
 // ──────────────────────────────────────────────
 import {
-    supportsOpenAIReasoningEffort,
     supportsOpenAIVerbosity,
     needsCopilotResponsesAPI,
     shouldStripOpenAISamplingParams,
@@ -300,12 +299,12 @@ describe('helpers: extractImageUrlFromPart — input_image type', () => {
 describe('helpers: collectStream — abort mid-stream', () => {
     it('stops collecting when abort signal fires', async () => {
         const ac = new AbortController();
-        let enqueued = 0;
+        let _enqueued = 0;
         const stream = new ReadableStream({
             start(controller) {
                 controller.enqueue('a');
                 controller.enqueue('b');
-                enqueued = 2;
+                _enqueued = 2;
             }
         });
         // abort before collecting
@@ -315,10 +314,10 @@ describe('helpers: collectStream — abort mid-stream', () => {
     });
 
     it('handles null value chunks', async () => {
-        let ctrl;
+        let _ctrl;
         const stream = new ReadableStream({
             start(controller) {
-                ctrl = controller;
+                _ctrl = controller;
                 controller.enqueue(null);
                 controller.enqueue('hello');
                 controller.close();
@@ -996,7 +995,7 @@ describe('sanitize: hasNonEmptyMessageContent', () => {
 // ──────────────────────────────────────────────
 // 8. slot-inference.js — uncovered branches
 // ──────────────────────────────────────────────
-import { scoreSlotHeuristic, SLOT_HEURISTICS } from '../src/shared/slot-inference.js';
+import { scoreSlotHeuristic } from '../src/shared/slot-inference.js';
 
 describe('slot-inference: scoreSlotHeuristic', () => {
     it('returns 0 for unknown text with unknown slot', () => {
@@ -1048,7 +1047,7 @@ describe('key-pool: edge cases', () => {
 // ──────────────────────────────────────────────
 // 10. settings-backup.js — uncovered branches
 // ──────────────────────────────────────────────
-import { createSettingsBackup, getAuxSettingKeys, getManagedSettingKeys, isManagedSettingKey, AUX_SETTING_SLOTS } from '../src/shared/settings-backup.js';
+import { createSettingsBackup, getAuxSettingKeys, getManagedSettingKeys, isManagedSettingKey } from '../src/shared/settings-backup.js';
 
 describe('settings-backup: edge cases', () => {
     function makeRisu() {

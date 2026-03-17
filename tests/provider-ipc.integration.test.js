@@ -396,7 +396,7 @@ describe('provider IPC integration', () => {
 
         try {
             const env = createPluginRisu('CPM Provider - Vertex AI', {
-                nativeFetch: async (url, init = {}) => {
+                nativeFetch: async (url, _init = {}) => {
                     if (url.includes('oauth2.googleapis.com/token')) {
                         return new Response(JSON.stringify({ access_token: 'vertex-access-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
                     }

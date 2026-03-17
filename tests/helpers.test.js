@@ -4,7 +4,7 @@
  * 주의: safeGetArg, safeGetBoolArg, setArg 등은 RisuAI API 의존이므로
  * 순수 함수만 테스트합니다.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { safeStringify, shouldEnableStreaming, isCompatibilityModeSettingEnabled } from '../src/shared/helpers.js';
 
 describe('safeStringify', () => {
