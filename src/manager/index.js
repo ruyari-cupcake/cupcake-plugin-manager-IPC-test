@@ -683,8 +683,8 @@ async function ipcFetchProvider(providerName, modelDef, messages, temp, maxToken
 
         const timer = setTimeout(() => {
             cleanup();
-            resolve({ success: false, content: `[CPM] Provider '${providerName}' timeout (300s)` });
-        }, 300000);
+            resolve({ success: false, content: `[CPM] Provider '${providerName}' timeout (1800s)` });
+        }, 1800000);
 
         // ── ABORT signal → IPC ABORT 전파 ──
         // factory.ts의 ABORT_SIGNAL_REF 메커니즘을 통해 AbortSignal이 정상적으로

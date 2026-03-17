@@ -239,8 +239,9 @@ export function formatToAnthropic(messages, _config = {}) {
                     const prev = formattedMsgs[formattedMsgs.length - 1];
                     if (!Array.isArray(prev.content)) prev.content = [{ type: 'text', text: typeof prev.content === 'string' ? prev.content : '' }];
                     prev.content.push(... /** @type {any[]} */ (contentParts));
+                    if (prev._origSources) prev._origSources.push(m);
                 } else {
-                    formattedMsgs.push({ role, content: contentParts });
+                    formattedMsgs.push({ role, content: contentParts, _origSources: [m] });
                 }
             } else {
                 const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
@@ -253,8 +254,9 @@ export function formatToAnthropic(messages, _config = {}) {
                     } else {
                         prev.content = [{ type: 'text', text: typeof prev.content === 'string' ? prev.content : '' }, { type: 'text', text }];
                     }
+                    if (prev._origSources) prev._origSources.push(m);
                 } else {
-                    formattedMsgs.push({ role, content: [{ type: 'text', text }] });
+                    formattedMsgs.push({ role, content: [{ type: 'text', text }], _origSources: [m] });
                 }
             }
             continue;
