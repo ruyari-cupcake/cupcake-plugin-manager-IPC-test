@@ -298,8 +298,9 @@ export function formatToAnthropic(messages, _config = {}) {
                     const prev = formattedMsgs[formattedMsgs.length - 1];
                     if (typeof prev.content === 'string') prev.content = [{ type: 'text', text: prev.content }, ...contentParts];
                     else if (Array.isArray(prev.content)) prev.content.push(... /** @type {any[]} */ (contentParts));
+                    if (prev._origSources) prev._origSources.push(m);
                 } else {
-                    formattedMsgs.push({ role, content: contentParts });
+                    formattedMsgs.push({ role, content: contentParts, _origSources: [m] });
                 }
                 continue;
             }

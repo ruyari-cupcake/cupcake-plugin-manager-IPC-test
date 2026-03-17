@@ -43,7 +43,8 @@ export function parseCustomModelsValue(value) {
         try {
             const parsed = JSON.parse(value);
             return Array.isArray(parsed) ? parsed.filter(entry => entry && typeof entry === 'object') : [];
-        } catch {
+        } catch (e) {
+            console.error('[CPM] Custom model JSON parse failed:', e);
             return [];
         }
     }

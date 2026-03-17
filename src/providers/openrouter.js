@@ -99,9 +99,7 @@ async function fetchOpenRouter(modelDef, messages, temp, maxTokens, args, settin
         }
         const reasoning = settings.cpm_openrouter_reasoning || '';
         if (reasoning && reasoning !== 'none' && reasoning !== 'off') {
-            // FEAT-6: reasoning with max_tokens (from temp_repo)
             body.reasoning = { effort: reasoning };
-            if (maxTokens) body.reasoning.max_tokens = maxTokens;
         }
         if (streamingEnabled && showTokenUsage) {
             body.stream_options = { include_usage: true };
