@@ -1,6 +1,10 @@
-# Cupcake Provider v4
+# Cupcake Provider Manager (CPM) v2.0.0
 
-> RisuAI V3 Plugin Channel 기반 AI 프로바이더 허브
+> RisuAI V3 Plugin Channel IPC 기반 AI 프로바이더 허브
+
+[![Tests](https://img.shields.io/badge/tests-1773%20passed-brightgreen)](#테스트)
+[![TypeScript](https://img.shields.io/badge/TS%20errors-0-blue)](#타입-체크)
+[![ESLint](https://img.shields.io/badge/ESLint-0%20warnings-blue)](#린트--포맷)
 
 ## 아키텍처
 
@@ -97,7 +101,12 @@ src/
 │   ├── key-pool.js          # API 키 로테이션 풀
 │   ├── gemini-helpers.js    # Gemini 전용 유틸리티
 │   ├── helpers.js           # smartFetch, streamingFetch, 범용 헬퍼
-│   └── aws-signer.js        # AWS V4 서명
+│   ├── aws-signer.js        # AWS V4 서명
+│   ├── safe-db-writer.js    # setDatabaseLite 보안 래퍼
+│   ├── auto-updater.js      # 메인 플러그인 자동 업데이트
+│   ├── companion-installer.js # 서브플러그인 설치
+│   ├── token-toast.js       # 토큰 사용량 토스트
+│   └── settings-backup.js   # 설정 백업/복원
 ├── manager/
 │   └── index.js             # 매니저 허브 (설정 UI + IPC 라우터)
 ├── providers/
@@ -114,14 +123,11 @@ src/
     ├── resizer.js            # 채팅 리사이저
     └── navigation.js         # 채팅 네비게이션
 
-tests/                        # Vitest 유닛 테스트
-├── key-pool.test.js
-├── sanitize.test.js
-├── message-format.test.js    # BUG-Q1~Q5 회귀 테스트 포함
-├── sse-parser.test.js
-├── gemini-helpers.test.js
-├── ipc-protocol.test.js
-└── helpers.test.js
+tests/                        # Vitest 테스트 (53 파일, 1773 테스트)
+├── *.test.js                 # 유닛 테스트 (49 파일)
+├── *.integration.test.js     # 통합 테스트 (4 파일)
+├── safe-db-writer.test.js    # setDatabaseLite 보안 검증 (21 테스트)
+└── security-integration.test.js  # 보안 통합 시나리오 (12 테스트)
 
 dist/                         # Rollup IIFE 빌드 출력
 ```
@@ -184,10 +190,36 @@ GitHub Actions 워크플로우 (`.github/workflows/ci.yml`):
 | 도구 | 버전 | 용도 |
 |---|---|---|
 | Rollup | 4.34 | IIFE 번들러 |
-| Vitest | 3.x | 테스트 프레임워크 |
+| Vitest | 4.x | 테스트 프레임워크 |
 | ESLint | 9.x | 린터 (flat config) |
 | Prettier | 3.x | 코드 포맷터 |
 | TypeScript | 5.x | JSDoc 타입 체크 (checkJs) |
+
+## 보안
+
+### setDatabaseLite 보안 래퍼
+
+RisuAI의 `setDatabaseLite`는 입력 검증 없이 DB에 직접 기록합니다. CPM은 `safe-db-writer.js`를 통해 다음을 방어합니다:
+
+| 공격 벡터 | 방어 |
+|-----------|------|
+| `guiHTML` / `customCSS` 주입 (XSS) | **BLOCKED_KEYS**로 차단 |
+| `characters` 배열 조작 | **BLOCKED_KEYS**로 차단 |
+| 무단 플러그인 설치 | `plugins` 배열 내 각 플러그인 구조 검증 |
+| http:// updateURL 변조 | https:// only 강제 |
+| API 버전 변조 | `version === '3.0'` 필수 |
+
+```javascript
+import { safeSetDatabaseLite } from './shared/safe-db-writer.js';
+const result = await safeSetDatabaseLite(Risu, { plugins: [...] });
+if (!result.ok) console.error(result.error);
+```
+
+### pluginChannel 메모리 누수 대응
+
+`setupChannelCleanup()`으로 플러그인 언로드 시 IPC 리스너를 no-op으로 교체합니다.
+완전한 수정은 RisuAI 본체의 `unloadV3Plugin()`에 `pluginChannel.delete()` 추가가 필요합니다.
+→ [PLUGIN_CHANNEL_DELETE_PATCH_DESIGN.md](PLUGIN_CHANNEL_DELETE_PATCH_DESIGN.md)
 
 ## 향후 계획
 
