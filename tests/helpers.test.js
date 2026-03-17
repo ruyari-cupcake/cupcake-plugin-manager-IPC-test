@@ -5,7 +5,7 @@
  * 순수 함수만 테스트합니다.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { safeStringify } from '../src/shared/helpers.js';
+import { safeStringify, shouldEnableStreaming, isCompatibilityModeSettingEnabled } from '../src/shared/helpers.js';
 
 describe('safeStringify', () => {
     it('기본 JSON 직렬화', () => {
@@ -43,5 +43,27 @@ describe('safeStringify', () => {
 
     it('문자열 값', () => {
         expect(safeStringify('test')).toBe('"test"');
+    });
+});
+
+describe('compatibility streaming helpers', () => {
+    it('detects compatibility mode booleans from persisted values', () => {
+        expect(isCompatibilityModeSettingEnabled(true)).toBe(true);
+        expect(isCompatibilityModeSettingEnabled('true')).toBe(true);
+        expect(isCompatibilityModeSettingEnabled('on')).toBe(true);
+        expect(isCompatibilityModeSettingEnabled('false')).toBe(false);
+        expect(isCompatibilityModeSettingEnabled(undefined)).toBe(false);
+    });
+
+    it('disables general-provider streaming when compatibility mode is enabled', () => {
+        expect(shouldEnableStreaming({ cpm_streaming_enabled: true, cpm_compatibility_mode: true })).toBe(false);
+    });
+
+    it('keeps Copilot streaming enabled even in compatibility mode', () => {
+        expect(shouldEnableStreaming({ cpm_streaming_enabled: true, cpm_compatibility_mode: true }, { isCopilot: true })).toBe(true);
+    });
+
+    it('returns false when streaming is globally disabled', () => {
+        expect(shouldEnableStreaming({ cpm_streaming_enabled: false, cpm_compatibility_mode: false }, { isCopilot: true })).toBe(false);
     });
 });

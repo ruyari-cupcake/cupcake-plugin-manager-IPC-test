@@ -1,14 +1,21 @@
 /**
  * CPM Provider — Gemini (Google AI Studio)
  */
-import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager } from '../shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager, setupChannelCleanup } from '../shared/ipc-protocol.js';
 import { KeyPool } from '../shared/key-pool.js';
 import { sanitizeBodyJSON } from '../shared/sanitize.js';
 import { formatToGemini } from '../shared/message-format.js';
 import { getGeminiSafetySettings, buildGeminiThinkingConfig, validateGeminiParams, cleanExperimentalModelParams } from '../shared/gemini-helpers.js';
-import { parseGeminiNonStreamingResponse } from '../shared/sse-parser.js';
+import { createSSEStream, parseGeminiSSELine, parseGeminiNonStreamingResponse } from '../shared/sse-parser.js';
 import { formatGeminiDynamicModels } from '../shared/dynamic-models.js';
-import { smartFetch, safeStringify } from '../shared/helpers.js';
+import { smartFetch, streamingFetch, safeStringify, shouldEnableStreaming } from '../shared/helpers.js';
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function parseRetryAfterMs(headers) {
+    const v = headers?.get?.('retry-after'); if (!v) return 0;
+    const n = Number(v); return Number.isFinite(n) ? n * 1000 : 0;
+}
+function isRetriableStatus(s) { return s === 408 || s === 429 || s === 503 || s === 529 || (s >= 500 && s < 600); }
 
 const PLUGIN_NAME = 'CPM Provider - Gemini';
 const Risu = getRisu();
@@ -65,14 +72,13 @@ async function fetchDynamicGeminiModels(settings = {}) {
     return formatGeminiDynamicModels(allModels);
 }
 
-async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, abortSignal) {
+async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, abortSignal, requestId) {
     if (abortSignal?.aborted) return { success: true, content: '' };
 
     const pool = new KeyPool(settings.cpm_gemini_key);
     if (pool.remaining === 0) return { success: false, content: '[Gemini] API key not configured' };
 
     return pool.withRotation(async (apiKey) => {
-        // FEAT-1: Model override
         const modelId = (settings.cpm_gemini_model || '').trim() || modelDef.id;
         const geminiMaxOutputTokens = getGeminiMaxOutputTokensLimit(modelId);
         const clampedMaxTokens = Number.isFinite(maxTokens)
@@ -84,6 +90,7 @@ async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, 
         const preserveSystem = settings.chat_gemini_preserveSystem !== false && settings.chat_gemini_preserveSystem !== 'false';
         const showThoughts = settings.chat_gemini_showThoughtsToken === true || settings.chat_gemini_showThoughtsToken === 'true';
         const useSignature = settings.chat_gemini_useThoughtSignature === true || settings.chat_gemini_useThoughtSignature === 'true';
+        const streamingEnabled = shouldEnableStreaming(settings);
 
         const { contents, systemInstruction: sysArr } = formatToGemini(messages, { preserveSystem, useThoughtSignature: useSignature });
 
@@ -109,7 +116,6 @@ async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, 
         cleanExperimentalModelParams(gc.generationConfig, modelId);
 
         // Strip thought:true from historical parts for thinking models
-        // (Gemini API may reject requests with thought:true in historical parts)
         const isThinkingModel = modelId && (/gemini-2\.5|gemini-3/i.test(modelId));
         if (isThinkingModel && gc.contents) {
             gc.contents = gc.contents.map(content => ({
@@ -121,19 +127,87 @@ async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, 
             }));
         }
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
-
-        // FEAT-8: usePlainFetch support
+        const baseModelUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}`;
         const usePlainFetch = settings.chat_gemini_usePlainFetch === true || settings.chat_gemini_usePlainFetch === 'true';
-        const fetchOptions = {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-            body: sanitizeBodyJSON(safeStringify(gc)),
-            signal: abortSignal
+        const safeBody = sanitizeBodyJSON(safeStringify(gc));
+        const headers = { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey };
+
+        // HTTP retry wrapper
+        const executeRequest = async (fetchFn, label, maxAttempts = 3) => {
+            let attempt = 0;
+            let response;
+            while (attempt < maxAttempts) {
+                response = await fetchFn();
+                if (response?.ok) return response;
+                const status = response?.status || 0;
+                if (!isRetriableStatus(status) || attempt >= maxAttempts - 1 || abortSignal?.aborted) return response;
+                response?.body?.cancel?.();
+                attempt++;
+                const retryDelay = parseRetryAfterMs(response?.headers) || (700 * attempt);
+                console.warn(`[CPM-Gemini] ${label} retry ${attempt}/${maxAttempts - 1} after HTTP ${status}`);
+                await sleep(retryDelay);
+            }
+            return response;
         };
+
+        if (streamingEnabled) {
+            const streamUrl = `${baseModelUrl}:streamGenerateContent?alt=sse`;
+            const fetchOpts = { method: 'POST', headers, body: safeBody, signal: abortSignal };
+            if (usePlainFetch) fetchOpts.plainFetchForce = true;
+
+            const res = await executeRequest(
+                () => streamingFetch(streamUrl, fetchOpts),
+                'streaming'
+            );
+            if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}`, _status: res.status };
+
+            const hasBody = !!(res.body && typeof res.body.getReader === 'function');
+            if (!hasBody) {
+                // Fallback to non-streaming
+                const nonStreamUrl = `${baseModelUrl}:generateContent`;
+                const fallbackOpts = { method: 'POST', headers, body: safeBody, signal: abortSignal };
+                if (usePlainFetch) fallbackOpts.plainFetchForce = true;
+                const fallbackRes = await executeRequest(
+                    () => smartFetch(nonStreamUrl, fallbackOpts),
+                    'non-stream fallback'
+                );
+                if (!fallbackRes.ok) return { success: false, content: `[Gemini Error ${fallbackRes.status}] ${await fallbackRes.text()}`, _status: fallbackRes.status };
+                const fallbackData = await fallbackRes.json();
+                return parseGeminiNonStreamingResponse(fallbackData, { showThoughtsToken: showThoughts, useThoughtSignature: useSignature });
+            }
+
+            const config = { showThoughtsToken: showThoughts, useThoughtSignature: useSignature, _requestId: requestId };
+            const sseStream = createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal);
+            const reader = sseStream.getReader();
+            let accumulated = '';
+            try {
+                while (true) {
+                    if (abortSignal?.aborted) break;
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) {
+                        accumulated += value;
+                        Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, {
+                            type: MSG.STREAM_CHUNK, requestId, chunk: value
+                        });
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') console.error('[CPM-Gemini] Stream error:', e.message);
+            }
+            Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.STREAM_END, requestId });
+            return { success: true, content: accumulated, _streamed: true };
+        }
+
+        // Non-streaming
+        const url = `${baseModelUrl}:generateContent`;
+        const fetchOptions = { method: 'POST', headers, body: safeBody, signal: abortSignal };
         if (usePlainFetch) fetchOptions.plainFetchForce = true;
 
-        const res = await smartFetch(url, fetchOptions);
+        const res = await executeRequest(
+            () => smartFetch(url, fetchOptions),
+            'request'
+        );
 
         if (!res.ok) {
             return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}`, _status: res.status };
@@ -179,7 +253,7 @@ async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, 
             const ac = new AbortController();
             _pendingAbortControllers.set(requestId, ac);
             try {
-                const result = await fetchGemini(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal);
+                const result = await fetchGemini(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal, requestId);
                 Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.RESPONSE, requestId, data: result });
             } catch (e) {
                 if (ac.signal.aborted) {
@@ -192,6 +266,7 @@ async function fetchGemini(modelDef, messages, temp, maxTokens, args, settings, 
             }
         });
         const ok = await registerWithManager(Risu, PLUGIN_NAME, { name: 'GoogleAI', models, settingsFields, supportsDynamicModels: true }, { onControlMessage: handleControlMessage });
+        setupChannelCleanup(Risu, [CH.ABORT, CH.FETCH]);
         console.log(`[CPM-Gemini] Provider initialized (registered: ${ok})`);
     } catch (e) { console.error('[CPM-Gemini] Init failed:', e); }
 })();

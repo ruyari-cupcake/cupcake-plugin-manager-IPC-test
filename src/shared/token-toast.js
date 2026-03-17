@@ -7,7 +7,7 @@ import { getRisu } from './ipc-protocol.js';
  * Displayed at the top-right corner, auto-dismisses after 6 seconds.
  * @param {string} modelName - Display name of the model
  * @param {{ input: number, output: number, reasoning: number, cached: number, total: number, reasoningEstimated?: boolean }} usage
- * @param {number} durationMs - Request duration in milliseconds
+ * @param {number} [durationMs] - Request duration in milliseconds
  */
 export async function showTokenUsageToast(modelName, usage, durationMs) {
     if (!usage) return;

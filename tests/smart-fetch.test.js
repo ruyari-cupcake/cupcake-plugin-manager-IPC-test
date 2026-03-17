@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { smartFetch } from '../src/shared/helpers.js';
+import { smartFetch, _resetCompatibilityModeCache } from '../src/shared/helpers.js';
 
 describe('smartFetch', () => {
     let mockRisu;
@@ -8,10 +8,12 @@ describe('smartFetch', () => {
         mockRisu = {
             nativeFetch: vi.fn(),
             risuFetch: vi.fn(),
+            getArgument: vi.fn(async () => ''),
         };
         globalThis.window = { risuai: mockRisu };
         globalThis.fetch = vi.fn().mockRejectedValue(new Error('CORS blocked'));
         vi.clearAllMocks();
+        _resetCompatibilityModeCache();
     });
 
     it('does not replay Copilot POST when nativeFetch returns a concrete HTTP error', async () => {
@@ -158,6 +160,25 @@ describe('smartFetch', () => {
 
             expect(res.status).toBe(200);
             expect(mockRisu.nativeFetch).toHaveBeenCalled();
+        });
+
+        it('skips nativeFetch for non-Copilot requests in compatibility mode', async () => {
+            mockRisu.getArgument.mockImplementation(async (key) => key === 'cpm_compatibility_mode' ? 'true' : '');
+            mockRisu.risuFetch.mockResolvedValue({
+                status: 0,
+                ok: false,
+                data: null,
+                headers: {},
+            });
+
+            await expect(smartFetch('https://api.example.com/v1/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: 'test', messages: [] }),
+            })).rejects.toThrow(/Compatibility mode skipped nativeFetch/i);
+
+            expect(mockRisu.nativeFetch).not.toHaveBeenCalled();
+            expect(mockRisu.risuFetch).toHaveBeenCalledOnce();
         });
     });
 });

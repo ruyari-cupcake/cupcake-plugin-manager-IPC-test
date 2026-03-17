@@ -25,6 +25,8 @@ export class KeyPool {
         this._originalKeys = [...this.keys];
         /** @type {string} 풀 이름 */
         this.name = name;
+        /** @type {string} JSON credential parse error cache */
+        this._jsonParseError = '';
     }
 
     /** @returns {string} 랜덤 키 (풀 비어있으면 빈 문자열) */
@@ -73,7 +75,8 @@ export class KeyPool {
             if (rem === 0) {
                 console.warn(`[KeyPool]${this.name ? ' ' + this.name + ':' : ''} ⚠️ 모든 키가 소진되었습니다. 원본 키 복원.`);
                 this.reset();
-                return result;
+                // Don't return — reset() restores original keys so next pick() succeeds.
+                // The loop continues and pick() will return a fresh key.
             }
         }
         return { success: false, content: `[KeyPool] 최대 재시도 횟수(${maxRetries}) 초과` };
@@ -82,12 +85,18 @@ export class KeyPool {
     /**
      * JSON 배열/객체 형식의 키 풀 생성 (AWS/Vertex 자격증명용)
      * @param {string} rawString JSON 문자열
+     * @param {string} [name] 풀 이름 (에러 메시지 구분용)
      * @returns {KeyPool}
      */
-    static fromJson(rawString) {
-        const pool = new KeyPool('');
+    static fromJson(rawString, name = '') {
+        const pool = new KeyPool('', name);
         const trimmed = (rawString || '').trim();
         if (!trimmed) return pool;
+        // Error detection: Windows path pasted instead of JSON
+        if (_looksLikeWindowsPath(trimmed)) {
+            pool._jsonParseError = _buildJsonCredentialError('windows_path', name);
+            return pool;
+        }
         try {
             const arr = JSON.parse(trimmed);
             if (Array.isArray(arr)) {
@@ -95,7 +104,12 @@ export class KeyPool {
                 pool._originalKeys = [...pool.keys];
                 return pool;
             }
-        } catch {}
+        } catch (e) {
+            // Detect common JSON credential mistakes
+            if (e instanceof SyntaxError) {
+                pool._jsonParseError = _buildJsonCredentialError('parse', name, e.message);
+            }
+        }
         // M-1: comma-separated JSON fallback: {"a":1},{"b":2}
         if (trimmed.startsWith('{')) {
             try {
@@ -117,4 +131,29 @@ export class KeyPool {
         } catch {}
         return pool;
     }
+}
+
+/**
+ * Detect Windows file path pasted as JSON credential
+ * @param {string} str
+ * @returns {boolean}
+ */
+function _looksLikeWindowsPath(str) {
+    return /^[A-Z]:\\|^\\\\[^\\]/.test(str);
+}
+
+/**
+ * Build descriptive error message for JSON credential parsing failures
+ * @param {'windows_path' | 'parse'} type
+ * @param {string} name Pool name
+ * @param {string} [detail] Extra detail
+ * @returns {string}
+ */
+function _buildJsonCredentialError(type, name, detail) {
+    const prefix = name ? `[${name}] ` : '';
+    if (type === 'windows_path') {
+        return `${prefix}JSON 자격증명 대신 파일 경로가 입력되었습니다. 파일의 내용을 복사하여 붙여넣으세요.`;
+    }
+    const msg = detail ? `: ${detail}` : '';
+    return `${prefix}JSON 파싱 실패${msg}. 유효한 JSON 형식인지 확인하세요. (예: [{"key":"value"}] 또는 {"key":"value"})`;
 }

@@ -3,29 +3,37 @@
   "version": "2.0.0-alpha.1",
   "type": "module",
   "description": "Cupcake Provider Manager v4 — IPC-based independent V3 plugins",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "rollup -c rollup.config.js",
+    "build:css": "node scripts/build-tailwind.cjs",
+    "build": "npm run build:css && rollup -c rollup.config.js",
     "build:watch": "rollup -c rollup.config.js --watch",
     "verify": "node scripts/verify-build.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "format": "prettier --write \"src/**/*.js\" \"tests/**/*.js\"",
     "format:check": "prettier --check \"src/**/*.js\" \"tests/**/*.js\"",
     "ci": "npm run lint && npm run typecheck && npm run test && npm run build && npm run verify"
   },
   "devDependencies": {
-    "rollup": "^4.34.0",
-    "@rollup/plugin-node-resolve": "^16.0.0",
-    "vitest": "^3.0.0",
-    "@vitest/coverage-v8": "^3.0.0",
-    "eslint": "^9.0.0",
     "@eslint/js": "^9.0.0",
-    "globals": "^16.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@tailwindcss/cli": "^4.2.1",
+    "@vitest/coverage-v8": "^4.0.18",
+    "eslint": "^10.0.3",
+    "globals": "^17.4.0",
+    "jsdom": "^28.1.0",
     "prettier": "^3.4.0",
-    "typescript": "^5.7.0"
+    "rollup": "^4.59.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }

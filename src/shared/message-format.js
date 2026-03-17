@@ -39,8 +39,8 @@ export function formatToOpenAI(messages, config = {}) {
 
     if (config.mergesys) {
         let sysPrompt = "";
-        let newMsgs = [];
-        for (let m of msgs) {
+        const newMsgs = [];
+        for (const m of msgs) {
             if (m.role === 'system') sysPrompt += (sysPrompt ? '\n' : '') + (typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
             else newMsgs.push(m);
         }
@@ -57,7 +57,7 @@ export function formatToOpenAI(messages, config = {}) {
     }
 
     /** @type {OpenAIFormattedMessage[]} */
-    let arr = [];
+    const arr = [];
     for (let i = 0; i < msgs.length; i++) {
         const m = msgs[i];
         if (!m || typeof m !== 'object') continue;
@@ -181,10 +181,10 @@ export function formatToOpenAI(messages, config = {}) {
  *   2. 선두 system만 top-level system 필드로 추출, 비선두는 user + "system: " 접두사
  *   3. 첨 메시지 플레이스홀더 "Start" (네이티브와 동일)
  * @param {ChatMessage[]} messages 원본 메시지 배열
- * @param {object} [config] 변환 옵션
+ * @param {object} [_config] 변환 옵션
  * @returns {AnthropicFormatResult}
  */
-export function formatToAnthropic(messages, config = {}) {
+export function formatToAnthropic(messages, _config = {}) {
     const validMsgs = sanitizeMessages(messages);
 
     // 1. 선두(leading) 시스템 메시지만 추출 — 비선두는 위치 유지
@@ -222,6 +222,11 @@ export function formatToAnthropic(messages, config = {}) {
             for (const modal of payload.multimodals) {
                 if (!modal || typeof modal !== 'object') continue;
                 if (modal.type === 'image') {
+                    // URL images (HTTP/HTTPS) — pass through as Anthropic URL source
+                    if (typeof modal.url === 'string' && (modal.url.startsWith('http://') || modal.url.startsWith('https://'))) {
+                        contentParts.push({ type: 'image', source: { type: 'url', url: modal.url } });
+                        continue;
+                    }
                     const base64Str = modal.base64 || '';
                     const commaIdx = base64Str.indexOf(',');
                     const mediaType = (commaIdx > -1 ? base64Str.split(';')[0]?.split(':')[1] : null) || 'image/png';

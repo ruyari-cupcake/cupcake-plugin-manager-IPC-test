@@ -15,6 +15,15 @@ const UNSIGNABLE_HEADERS = new Set([
 ]);
 
 export class AwsV4Signer {
+    /**
+     * @param {{
+     *   method?: string, url: string, headers?: HeadersInit, body?: string,
+     *   accessKeyId: string, secretAccessKey: string, sessionToken?: string,
+     *   service?: string, region?: string, cache?: Map<string,ArrayBuffer>,
+     *   datetime?: string, signQuery?: boolean, appendSessionToken?: boolean,
+     *   allHeaders?: boolean, singleEncode?: boolean
+     * }} options
+     */
     constructor({
         method, url, headers, body, accessKeyId, secretAccessKey,
         sessionToken, service, region, cache, datetime, signQuery,
@@ -80,7 +89,7 @@ export class AwsV4Signer {
 
         if (this.service === "s3") {
             try { this.encodedPath = decodeURIComponent(this.url.pathname.replace(/\+/g, " ")); }
-            catch (e) { this.encodedPath = this.url.pathname; }
+            catch { this.encodedPath = this.url.pathname; }
         } else {
             this.encodedPath = this.url.pathname.replace(/\/+/g, "/");
         }

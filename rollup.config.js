@@ -8,6 +8,7 @@
  * with //@api 3.0 header and metadata comments.
  */
 import { nodeResolve } from '@rollup/plugin-node-resolve';
+import terser from '@rollup/plugin-terser';
 
 /* ─── Plugin entries ─── */
 const entries = [
@@ -51,12 +52,34 @@ export default entries.map(entry => ({
     output: {
         file: `dist/${entry.name}.js`,
         format: 'iife',
-        banner: makeBanner(entry),
-        // No 'name' for IIFE — self-executing, no global export needed
+        banner: process.env.NODE_ENV === 'production' ? '' : makeBanner(entry),
         sourcemap: false,
+    },
+    treeshake: {
+        moduleSideEffects: false,
+        propertyReadSideEffects: false,
     },
     plugins: [
         nodeResolve(),
+        ...(process.env.NODE_ENV === 'production' ? [terser({
+            compress: {
+                passes: 3,
+                pure_getters: true,
+                drop_console: false,
+                ecma: 2020,
+                toplevel: true,
+                unsafe_methods: true,
+            },
+            mangle: {
+                properties: false,
+                toplevel: true,
+            },
+            format: {
+                preamble: makeBanner(entry),
+                comments: false,       // 모든 주석 제거 후 preamble로 배너 추가
+                ecma: 2020,
+            },
+        })] : []),
     ],
     // Suppress "circular dependency" warnings for internal modules
     onwarn(warning, warn) {

@@ -1,13 +1,19 @@
 /**
  * CPM Provider — OpenAI (GPT)
  */
-import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager } from '../shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager, setupChannelCleanup } from '../shared/ipc-protocol.js';
 import { KeyPool } from '../shared/key-pool.js';
 import { sanitizeBodyJSON } from '../shared/sanitize.js';
 import { formatToOpenAI } from '../shared/message-format.js';
-import { parseOpenAINonStreamingResponse } from '../shared/sse-parser.js';
+import {
+    parseOpenAINonStreamingResponse,
+    parseResponsesAPINonStreamingResponse,
+    createOpenAISSEStream,
+    createResponsesAPISSEStream,
+} from '../shared/sse-parser.js';
 import { formatOpenAIDynamicModels } from '../shared/dynamic-models.js';
-import { smartFetch, safeStringify } from '../shared/helpers.js';
+import { smartFetch, streamingFetch, safeStringify, shouldEnableStreaming } from '../shared/helpers.js';
+import { needsCopilotResponsesAPI } from '../shared/model-helpers.js';
 import {
     needsMaxCompletionTokens,
     shouldStripGPT54SamplingForReasoning,
@@ -15,12 +21,32 @@ import {
     supportsOpenAIReasoningEffort,
     supportsOpenAIVerbosity,
 } from '../shared/model-helpers.js';
+import { ensureCopilotApiToken, getCopilotApiBase } from '../shared/copilot-token.js';
+import { safeUUID } from '../shared/ipc-protocol.js';
+import { getCopilotStaticHeaders, shouldUseLegacyCopilotRequestHeaders } from '../shared/copilot-headers.js';
 
 const PLUGIN_NAME = 'CPM Provider - OpenAI';
 const Risu = getRisu();
 
 // ── Abort tracking ──
 const _pendingAbortControllers = new Map(); // requestId → AbortController
+
+// ── HTTP retry helpers ──
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const parseRetryAfterMs = (headers) => {
+    const raw = headers?.get?.('retry-after');
+    if (!raw) return 0;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.max(0, Math.floor(seconds * 1000));
+    const retryAt = Date.parse(raw);
+    if (Number.isNaN(retryAt)) return 0;
+    return Math.max(0, retryAt - Date.now());
+};
+const isRetriableStatus = (status) => status === 408 || status === 429 || status >= 500;
+
+// ── Copilot session IDs ──
+let _copilotMachineId = null;
+let _copilotSessionId = null;
 
 const models = [
     { uniqueId: 'openai-gpt-4.1-2025-04-14',    id: 'gpt-4.1-2025-04-14',    name: 'GPT-4.1 (2025/04/14)',    provider: 'OpenAI' },
@@ -78,7 +104,6 @@ async function fetchOpenAI(modelDef, messages, temp, maxTokens, args, settings, 
 
     return pool.withRotation(async (apiKey) => {
         const baseUrl = (settings.cpm_openai_url || 'https://api.openai.com').replace(/\/+$/, '');
-        // FEAT-1: Model override
         const modelId = (settings.cpm_openai_model || '').trim() || modelDef.id;
         const useMaxCompletionTokens = needsMaxCompletionTokens(modelId);
         const disableSampling = shouldStripOpenAISamplingParams(modelId);
@@ -86,49 +111,195 @@ async function fetchOpenAI(modelDef, messages, temp, maxTokens, args, settings, 
         const showThinking = settings.cpm_streaming_show_thinking === true || settings.cpm_streaming_show_thinking === 'true';
         const validServiceTiers = new Set(['flex', 'default']);
 
-        // BUG-Q4 FIX: GPT-5.x, o-series developer role (o2-o9, o1 except o1-preview/o1-mini)
-        const useDeveloperRole = /^gpt-5/.test(modelId) || /^o(?:[2-9]|1(?!-(?:preview|mini)))/.test(modelId);
+        // Copilot detection
+        const isCopilotUrl = baseUrl.includes('githubcopilot.com');
+        const isManualResponsesEndpoint = /\/responses(?:\?|$)/.test(baseUrl);
+        const _needsResponsesAPI = isManualResponsesEndpoint || (isCopilotUrl && needsCopilotResponsesAPI(modelId));
+        const streamingEnabled = shouldEnableStreaming(settings, { isCopilot: isCopilotUrl });
+        const copilotNodelessMode = settings.cpm_copilot_nodeless_mode || 'off';
+
+        // Determine effective URL
+        let effectiveUrl = `${baseUrl}/v1/chat/completions`;
+        if (_needsResponsesAPI) {
+            if (isCopilotUrl) {
+                const copilotBase = getCopilotApiBase() || 'https://api.githubcopilot.com';
+                effectiveUrl = `${copilotBase}/responses`;
+            } else {
+                effectiveUrl = `${baseUrl}/responses`;
+            }
+        }
+
+        // GPT-5.x, o-series developer role
+        const useDeveloperRole = /(?:^|\/)(?:gpt-5|o[2-9]|o1(?!-(?:preview|mini)))/i.test(modelId);
         const formatted = formatToOpenAI(messages, { developerRole: useDeveloperRole });
 
-        const body = { model: modelId, messages: formatted };
-        if (useMaxCompletionTokens) {
-            body.max_completion_tokens = maxTokens || 16384;
+        /** @type {Record<string, any>} */
+        const body = { model: modelId, stream: streamingEnabled };
+
+        // Responses API vs Chat Completions
+        if (_needsResponsesAPI) {
+            body.input = Array.isArray(formatted) ? formatted.filter(m => m != null && typeof m === 'object').map(({ name, ...rest }) => rest) : [];
+            body.max_output_tokens = maxTokens || 16384;
         } else {
-            if (maxTokens) body.max_tokens = maxTokens;
+            body.messages = formatted;
+            if (useMaxCompletionTokens) {
+                body.max_completion_tokens = maxTokens || 16384;
+            } else {
+                if (maxTokens) body.max_tokens = maxTokens;
+            }
         }
+
+        // Reasoning effort
         if (supportsOpenAIReasoningEffort(modelId)) {
             const effort = settings.cpm_openai_reasoning || '';
-            if (effort && effort !== 'none' && effort !== 'off') body.reasoning_effort = effort;
+            if (effort && effort !== 'none' && effort !== 'off') {
+                if (_needsResponsesAPI) {
+                    body.reasoning = { effort, summary: 'auto' };
+                } else {
+                    body.reasoning_effort = effort;
+                }
+            }
         }
         const verb = settings.cpm_openai_verbosity || '';
         if (verb && verb !== 'none' && supportsOpenAIVerbosity(modelId)) body.verbosity = verb;
+
+        // Sampling params
         if (!disableSampling && !gpt54ReasoningStrip) {
             if (temp !== undefined && temp !== null) body.temperature = temp;
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
             if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
         }
+
+        // Service tier
         const tierRaw = settings.common_openai_servicetier || '';
         const tier = String(tierRaw).trim().toLowerCase();
         if (tier && tier !== 'auto' && validServiceTiers.has(tier)) body.service_tier = tier;
-        const cacheRetention = settings.cpm_openai_prompt_cache_retention || '';
-        if (cacheRetention && cacheRetention !== 'none') body.prompt_cache_retention = cacheRetention;
 
-        // STB-10: stream_options for token usage display (SSE에 토큰 사용량 포함)
+        // Prompt cache retention
+        const cacheRetention = settings.cpm_openai_prompt_cache_retention || '';
+        if (cacheRetention && cacheRetention !== 'none' && !_needsResponsesAPI) body.prompt_cache_retention = cacheRetention;
+
+        // Token usage tracking
         const showTokenUsage =
             settings.cpm_streaming_show_token_usage === true || settings.cpm_streaming_show_token_usage === 'true' ||
             settings.cpm_show_token_usage === true || settings.cpm_show_token_usage === 'true';
-        if (showTokenUsage) body.stream_options = { include_usage: true };
+        if (streamingEnabled && showTokenUsage && !_needsResponsesAPI) {
+            body.stream_options = { include_usage: true };
+        }
 
+        // Headers
         const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
-        const res = await smartFetch(`${baseUrl}/v1/chat/completions`, {
-            method: 'POST', headers, body: sanitizeBodyJSON(safeStringify(body)), signal: abortSignal
-        });
+
+        // Copilot header injection
+        if (isCopilotUrl) {
+            try {
+                const copilotApiToken = await ensureCopilotApiToken();
+                if (copilotApiToken) headers['Authorization'] = `Bearer ${copilotApiToken}`;
+            } catch {}
+            if (!_copilotMachineId) _copilotMachineId = Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+            if (!_copilotSessionId) _copilotSessionId = safeUUID() + Date.now().toString();
+            Object.assign(headers, getCopilotStaticHeaders(copilotNodelessMode));
+            if (!shouldUseLegacyCopilotRequestHeaders(copilotNodelessMode)) {
+                headers['Vscode-Machineid'] = _copilotMachineId;
+                headers['Vscode-Sessionid'] = _copilotSessionId;
+                headers['X-Interaction-Id'] = safeUUID();
+                headers['X-Request-Id'] = safeUUID();
+            }
+            // Vision detection
+            const _msgArr = body.messages || body.input || [];
+            const hasVisionContent = _msgArr.some(m => Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url'));
+            if (hasVisionContent) headers['Copilot-Vision-Request'] = 'true';
+        }
+
+        // HTTP retry wrapper
+        const executeRequest = async (fetchFn, label, maxAttempts = 3) => {
+            let attempt = 0;
+            let response;
+            while (attempt < maxAttempts) {
+                response = await fetchFn();
+                if (response?.ok) return response;
+                const status = response?.status || 0;
+                if (!isRetriableStatus(status) || attempt >= maxAttempts - 1 || abortSignal?.aborted) return response;
+                response?.body?.cancel?.();
+                attempt++;
+                const retryDelay = parseRetryAfterMs(response?.headers) || (700 * attempt);
+                console.warn(`[CPM-OpenAI] ${label} retry ${attempt}/${maxAttempts - 1} after HTTP ${status}`);
+                await sleep(retryDelay);
+            }
+            return response;
+        };
+
+        const safeBody = sanitizeBodyJSON(safeStringify(body));
+
+        if (streamingEnabled) {
+            // Streaming path
+            const res = await executeRequest(
+                () => streamingFetch(effectiveUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                'streaming'
+            );
+            if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}`, _status: res.status };
+
+            const hasBody = !!(res.body && typeof res.body.getReader === 'function');
+            if (!hasBody) {
+                // Fallback: retry as non-streaming
+                /** @type {Record<string, any>} */
+                const fallbackBody = { ...body, stream: false };
+                delete fallbackBody.stream_options;
+                const fallbackRes = await executeRequest(
+                    () => smartFetch(effectiveUrl, { method: 'POST', headers, body: safeStringify(fallbackBody), signal: abortSignal }),
+                    'non-stream fallback'
+                );
+                if (!fallbackRes.ok) return { success: false, content: `[OpenAI Error ${fallbackRes.status}] ${await fallbackRes.text()}`, _status: fallbackRes.status };
+                const fallbackData = await fallbackRes.json();
+                if (_needsResponsesAPI) return parseResponsesAPINonStreamingResponse(fallbackData, { showThinking, _requestId: requestId });
+                return parseOpenAINonStreamingResponse(fallbackData, { showThinking, _requestId: requestId });
+            }
+
+            // Create SSE stream and collect as string for IPC transfer
+            let sseStream;
+            if (_needsResponsesAPI) {
+                sseStream = createResponsesAPISSEStream(res, abortSignal, { showThinking, _requestId: requestId });
+            } else {
+                sseStream = createOpenAISSEStream(res, abortSignal, { showThinking, _requestId: requestId });
+            }
+
+            // Stream chunks via IPC
+            const reader = sseStream.getReader();
+            let accumulated = '';
+            try {
+                while (true) {
+                    if (abortSignal?.aborted) break;
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) {
+                        accumulated += value;
+                        Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, {
+                            type: MSG.STREAM_CHUNK, requestId, chunk: value
+                        });
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') console.error('[CPM-OpenAI] Stream error:', e.message);
+            }
+            // Send stream end
+            Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, {
+                type: MSG.STREAM_END, requestId
+            });
+            return { success: true, content: accumulated, _streamed: true };
+        }
+
+        // Non-streaming path
+        const res = await executeRequest(
+            () => smartFetch(effectiveUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+            'request'
+        );
         if (!res.ok) {
             return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}`, _status: res.status };
         }
 
         const data = await res.json();
+        if (_needsResponsesAPI) return parseResponsesAPINonStreamingResponse(data, { showThinking, _requestId: requestId });
         const parsed = parseOpenAINonStreamingResponse(data, { showThinking, _requestId: requestId });
         if (parsed?.success || data?.error) return parsed;
         return { success: false, content: `[OpenAI] Unexpected response (HTTP ${res?.status || '?'})`, _status: res?.status };
@@ -184,6 +355,7 @@ async function fetchOpenAI(modelDef, messages, temp, maxTokens, args, settings, 
             }
         });
         const ok = await registerWithManager(Risu, PLUGIN_NAME, { name: 'OpenAI', models, settingsFields, supportsDynamicModels: true }, { onControlMessage: handleControlMessage });
+        setupChannelCleanup(Risu, [CH.ABORT, CH.FETCH]);
         console.log(`[CPM-OpenAI] Provider initialized (registered: ${ok})`);
     } catch (e) { console.error('[CPM-OpenAI] Init failed:', e); }
 })();

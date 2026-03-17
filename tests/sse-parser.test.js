@@ -248,7 +248,7 @@ describe('parseClaudeNonStreamingResponse', () => {
             ],
         };
         const result = parseClaudeNonStreamingResponse(data, { showThinking: true });
-        expect(result.content).toContain('[REDACTED]');
+        expect(result.content).toContain('{{redacted_thinking}}');
         expect(result.content).toContain('Answer');
     });
 

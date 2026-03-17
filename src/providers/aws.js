@@ -1,7 +1,7 @@
 /**
  * CPM Provider — AWS Bedrock (V4 Signing, Non-streaming only)
  */
-import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager } from '../shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager, setupChannelCleanup } from '../shared/ipc-protocol.js';
 import { sanitizeBodyJSON } from '../shared/sanitize.js';
 import { formatToAnthropic } from '../shared/message-format.js';
 import { parseClaudeNonStreamingResponse } from '../shared/sse-parser.js';
@@ -102,7 +102,7 @@ async function fetchDynamicAwsModels(settings = {}) {
     return [];
 }
 
-async function fetchAws(modelDef, messages, temp, maxTokens, args, settings, abortSignal) {
+async function fetchAws(modelDef, messages, temp, maxTokens, args, settings, abortSignal, requestId) {
     if (abortSignal?.aborted) return { success: true, content: '' };
 
     const pairs = pairKeys(settings.cpm_aws_key, settings.cpm_aws_secret);
@@ -219,7 +219,7 @@ async function fetchAws(modelDef, messages, temp, maxTokens, args, settings, abo
                 }
                 return { success: false, content: `[AWS] ${data.error?.message || JSON.stringify(data.error)}`, _status: status };
             }
-            return parseClaudeNonStreamingResponse(data, { showThinking });
+            return parseClaudeNonStreamingResponse(data, { showThinking, _requestId: requestId });
         } catch (e) {
             if (abortSignal?.aborted) return { success: true, content: '' };
             const msg = String(e?.message || '');
@@ -269,7 +269,7 @@ async function fetchAws(modelDef, messages, temp, maxTokens, args, settings, abo
             const ac = new AbortController();
             _pendingAbortControllers.set(requestId, ac);
             try {
-                const result = await fetchAws(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal);
+                const result = await fetchAws(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal, requestId);
                 Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.RESPONSE, requestId, data: result });
             } catch (e) {
                 if (ac.signal.aborted) {
@@ -282,6 +282,7 @@ async function fetchAws(modelDef, messages, temp, maxTokens, args, settings, abo
             }
         });
         const ok = await registerWithManager(Risu, PLUGIN_NAME, { name: 'AWS', models: AWS_MODELS, settingsFields, supportsDynamicModels: true }, { onControlMessage: handleControlMessage });
+        setupChannelCleanup(Risu, [CH.ABORT, CH.FETCH]);
         console.log(`[CPM-AWS] Provider initialized (registered: ${ok})`);
     } catch (e) { console.error('[CPM-AWS] Init failed:', e); }
 })();

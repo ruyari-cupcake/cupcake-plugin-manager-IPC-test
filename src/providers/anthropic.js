@@ -2,19 +2,32 @@
  * CPM Provider — Anthropic (Claude)
  * 설정값은 매니저가 IPC fetch 메시지의 settings 객체에 포함해서 전달합니다.
  */
-import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager } from '../shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager, setupChannelCleanup } from '../shared/ipc-protocol.js';
 import { KeyPool } from '../shared/key-pool.js';
 import { sanitizeBodyJSON } from '../shared/sanitize.js';
 import { formatToAnthropic } from '../shared/message-format.js';
-import { parseClaudeNonStreamingResponse } from '../shared/sse-parser.js';
+import { parseClaudeNonStreamingResponse, createAnthropicSSEStream } from '../shared/sse-parser.js';
 import { formatAnthropicDynamicModels } from '../shared/dynamic-models.js';
-import { smartFetch, safeStringify } from '../shared/helpers.js';
+import { smartFetch, streamingFetch, safeStringify, shouldEnableStreaming } from '../shared/helpers.js';
 
 const PLUGIN_NAME = 'CPM Provider - Anthropic';
 const Risu = getRisu();
 
 // ── Abort tracking ──
 const _pendingAbortControllers = new Map();
+
+// ── HTTP retry helpers ──
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const parseRetryAfterMs = (headers) => {
+    const raw = headers?.get?.('retry-after');
+    if (!raw) return 0;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.max(0, Math.floor(seconds * 1000));
+    const retryAt = Date.parse(raw);
+    if (Number.isNaN(retryAt)) return 0;
+    return Math.max(0, retryAt - Date.now());
+};
+const isRetriableStatus = (status) => status === 408 || status === 429 || status >= 500;
 
 const models = [
     { uniqueId: 'anthropic-claude-sonnet-4-6',          id: 'claude-sonnet-4-6',          name: 'Claude 4.6 Sonnet',              provider: 'Anthropic' },
@@ -73,7 +86,7 @@ async function fetchDynamicAnthropicModels(settings = {}) {
     return formatAnthropicDynamicModels(allModels);
 }
 
-async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, settings, abortSignal) {
+async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, settings, abortSignal, requestId) {
     if (abortSignal?.aborted) return { success: true, content: '' };
 
     const pool = new KeyPool(settings.cpm_anthropic_key);
@@ -81,16 +94,16 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
 
     return pool.withRotation(async (apiKey) => {
         const baseUrl = (settings.cpm_anthropic_url || 'https://api.anthropic.com').replace(/\/+$/, '');
-        // FEAT-1: Model override
         const modelId = (settings.cpm_anthropic_model || '').trim() || modelDef.id;
         const useCaching = settings.chat_claude_caching === true || settings.chat_claude_caching === 'true';
         const thinkingBudget = parseInt(settings.cpm_anthropic_thinking_budget) || 0;
         const thinkingEffort = settings.cpm_anthropic_thinking_effort || '';
+        const streamingEnabled = shouldEnableStreaming(settings);
+        const showThinking = settings.cpm_streaming_show_thinking === true || settings.cpm_streaming_show_thinking === 'true';
 
-        // sanitizeMessages is called internally by formatToAnthropic — no need to double-sanitize
         const { messages: chatMessages, system: systemPrompt } = formatToAnthropic(messages, {});
 
-        const body = { model: modelId, messages: chatMessages, max_tokens: maxTokens || 4096 };
+        const body = { model: modelId, messages: chatMessages, max_tokens: maxTokens || 4096, stream: streamingEnabled };
         if (temp !== undefined && temp !== null) body.temperature = temp;
         if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
         if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
@@ -105,7 +118,6 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
         // Thinking config
         const isAdaptive = modelId === 'claude-sonnet-4-6' || modelId === 'claude-opus-4-6';
         if (thinkingEffort && isAdaptive) {
-            // Claude 4.6 adaptive thinking
             body.thinking = { type: 'adaptive' };
             const effort = ['low', 'medium', 'high', 'max'].includes(thinkingEffort) ? thinkingEffort : 'high';
             body.output_config = { effort };
@@ -113,7 +125,6 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
             body.thinking = { type: 'enabled', budget_tokens: thinkingBudget };
         }
         if (body.thinking) {
-            // Anthropic API rejects temperature/top_k/top_p when thinking is enabled
             delete body.temperature;
             delete body.top_k;
             delete body.top_p;
@@ -124,13 +135,9 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
             }
         }
 
-        // 1-hour extended caching support
-        // Migration compatibility: temp_repo stored this as cpm_anthropic_cache_ttl='1h'.
+        // Extended caching
         const legacyCacheTtl = String(settings.cpm_anthropic_cache_ttl || '').trim().toLowerCase();
-        const use1HourCache =
-            settings.cpm_anthropic_cache_1h === true ||
-            settings.cpm_anthropic_cache_1h === 'true' ||
-            legacyCacheTtl === '1h';
+        const use1HourCache = settings.cpm_anthropic_cache_1h === true || settings.cpm_anthropic_cache_1h === 'true' || legacyCacheTtl === '1h';
 
         const headers = {
             'Content-Type': 'application/json',
@@ -138,18 +145,79 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
             'anthropic-version': '2023-06-01',
             'anthropic-dangerous-direct-browser-access': 'true',
         };
-        // Build beta headers (prompt-caching is GA — no longer needs beta header)
         const betaParts = [];
         if (body.thinking) betaParts.push('interleaved-thinking-2025-05-14');
-        // output-128k beta for large output requests
         if (body.max_tokens > 8192) betaParts.push('output-128k-2025-02-19');
-        // extended-cache-ttl for 1-hour caching
         if (use1HourCache) betaParts.push('extended-cache-ttl-2025-04-11');
         if (betaParts.length > 0) headers['anthropic-beta'] = betaParts.join(',');
 
-        const res = await smartFetch(`${baseUrl}/v1/messages`, {
-            method: 'POST', headers, body: sanitizeBodyJSON(safeStringify(body)), signal: abortSignal
-        });
+        // HTTP retry wrapper
+        const executeRequest = async (fetchFn, label, maxAttempts = 3) => {
+            let attempt = 0;
+            let response;
+            while (attempt < maxAttempts) {
+                response = await fetchFn();
+                if (response?.ok) return response;
+                const status = response?.status || 0;
+                if (!isRetriableStatus(status) || attempt >= maxAttempts - 1 || abortSignal?.aborted) return response;
+                response?.body?.cancel?.();
+                attempt++;
+                const retryDelay = parseRetryAfterMs(response?.headers) || (700 * attempt);
+                console.warn(`[CPM-Anthropic] ${label} retry ${attempt}/${maxAttempts - 1} after HTTP ${status}`);
+                await sleep(retryDelay);
+            }
+            return response;
+        };
+
+        const safeBody = sanitizeBodyJSON(safeStringify(body));
+
+        if (streamingEnabled) {
+            const res = await executeRequest(
+                () => streamingFetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                'streaming'
+            );
+            if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}`, _status: res.status };
+
+            const hasBody = !!(res.body && typeof res.body.getReader === 'function');
+            if (!hasBody) {
+                // Fallback to non-streaming
+                const fallbackBody = { ...body, stream: false };
+                const fallbackRes = await executeRequest(
+                    () => smartFetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: safeStringify(fallbackBody), signal: abortSignal }),
+                    'non-stream fallback'
+                );
+                if (!fallbackRes.ok) return { success: false, content: `[Anthropic Error ${fallbackRes.status}] ${await fallbackRes.text()}`, _status: fallbackRes.status };
+                const fallbackData = await fallbackRes.json();
+                return parseClaudeNonStreamingResponse(fallbackData, { showThinking });
+            }
+
+            const sseStream = createAnthropicSSEStream(res, abortSignal, { showThinking, _requestId: requestId });
+            const reader = sseStream.getReader();
+            let accumulated = '';
+            try {
+                while (true) {
+                    if (abortSignal?.aborted) break;
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) {
+                        accumulated += value;
+                        Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, {
+                            type: MSG.STREAM_CHUNK, requestId, chunk: value
+                        });
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') console.error('[CPM-Anthropic] Stream error:', e.message);
+            }
+            Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.STREAM_END, requestId });
+            return { success: true, content: accumulated, _streamed: true };
+        }
+
+        // Non-streaming
+        const res = await executeRequest(
+            () => smartFetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+            'request'
+        );
         if (!res.ok) {
             return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}`, _status: res.status };
         }
@@ -159,7 +227,6 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
         if (data.type === 'error' || data.error) {
             return { success: false, content: `[Anthropic] ${data.error?.message || JSON.stringify(data.error || data)}`, _status: res?.status };
         }
-        const showThinking = settings.cpm_streaming_show_thinking === true || settings.cpm_streaming_show_thinking === 'true';
         return parseClaudeNonStreamingResponse(data, { showThinking });
     });
 }
@@ -220,6 +287,7 @@ async function fetchAnthropic(modelDef, messages, temp, maxTokens, args, setting
 
         // 매니저에 등록 (ACK 올 때까지 자동 재시도)
         const ok = await registerWithManager(Risu, PLUGIN_NAME, { name: 'Anthropic', models, settingsFields, supportsDynamicModels: true }, { onControlMessage: handleControlMessage });
+        setupChannelCleanup(Risu, [CH.ABORT, CH.FETCH]);
         console.log(`[CPM-Anthropic] Provider initialized (registered: ${ok})`);
     } catch (e) {
         console.error('[CPM-Anthropic] Init failed:', e);

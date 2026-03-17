@@ -35,6 +35,9 @@ export const MSG = {
     FETCH_REQUEST:     'fetch-request',
     RESPONSE:          'response',
     ERROR:             'error',
+    // 스트리밍 (Provider → Manager)
+    STREAM_CHUNK:      'stream-chunk',     // { requestId, chunk: string }
+    STREAM_END:        'stream-end',       // { requestId, tokenUsage?, error? }
     // 중단
     ABORT:             'abort',
 };
@@ -124,5 +127,24 @@ export function registerWithManager(Risu, pluginName, payload, opts = {}) {
             }
         }
         trySend();
+    });
+}
+
+/**
+ * setupChannelCleanup — onUnload 시 IPC 채널 리스너 비활성화
+ *
+ * RisuAI V3의 pluginChannel은 removePluginChannelListener를 제공하지 않으므로,
+ * 리스너 콜백을 no-op으로 교체하여 메모리 누수와 stale 메시지 처리를 방지합니다.
+ *
+ * @param {object} Risu - RisuAI API 레퍼런스
+ * @param {string[]} channelNames - 비활성화할 채널 이름 배열
+ */
+export function setupChannelCleanup(Risu, channelNames) {
+    if (typeof Risu.onUnload !== 'function') return;
+    Risu.onUnload(() => {
+        for (const ch of channelNames) {
+            // 기존 리스너를 no-op으로 교체 (제거 API 미제공 대응)
+            Risu.addPluginChannelListener(ch, () => {});
+        }
     });
 }

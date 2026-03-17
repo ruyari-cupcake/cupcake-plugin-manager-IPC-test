@@ -1,8 +1,10 @@
+import { buildCopilotTokenExchangeHeaders, normalizeCopilotNodelessMode } from './copilot-headers.js';
+
 const TOKEN_ARG_KEY = 'tools_githubCopilotToken';
 const DEFAULT_API_BASE = 'https://api.githubcopilot.com';
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36';
-const CODE_VERSION = '1.109.2';
-const CHAT_VERSION = '0.37.4';
+
+/** @constant {number} Negative cache duration — prevents rapid retry loops on token failure */
+const _NEGATIVE_CACHE_MS = 60000;
 
 let _copilotTokenCache = { token: '', expiry: 0 };
 let _pendingTokenPromise = null;
@@ -40,6 +42,10 @@ export async function ensureCopilotApiToken(deps = {}) {
     if (_copilotTokenCache.token && Date.now() < _copilotTokenCache.expiry - 60000) {
         return _copilotTokenCache.token;
     }
+    // Negative cache: if a recent attempt failed, don't retry immediately
+    if (!_copilotTokenCache.token && _copilotTokenCache.expiry > 0 && Date.now() < _copilotTokenCache.expiry) {
+        return '';
+    }
     if (_pendingTokenPromise) return _pendingTokenPromise;
 
     const getArg = deps.getArg || _getArgFn;
@@ -50,20 +56,17 @@ export async function ensureCopilotApiToken(deps = {}) {
         const githubToken = await getArg(TOKEN_ARG_KEY);
         const cleanToken = sanitizeCopilotToken(githubToken);
         if (!cleanToken) return '';
+        const nodelessMode = normalizeCopilotNodelessMode(await getArg('cpm_copilot_nodeless_mode'));
 
         try {
             const res = await fetchFn('https://api.github.com/copilot_internal/v2/token', {
                 method: 'GET',
-                headers: {
-                    Accept: 'application/json',
-                    Authorization: `Bearer ${cleanToken}`,
-                    'User-Agent': USER_AGENT,
-                    'Editor-Version': `vscode/${CODE_VERSION}`,
-                    'Editor-Plugin-Version': `copilot-chat/${CHAT_VERSION}`,
-                    'X-GitHub-Api-Version': '2024-12-15',
-                },
+                headers: buildCopilotTokenExchangeHeaders(cleanToken, nodelessMode),
             });
-            if (!res?.ok) return '';
+            if (!res?.ok) {
+                _copilotTokenCache = { token: '', expiry: Date.now() + _NEGATIVE_CACHE_MS };
+                return '';
+            }
             const data = await res.json();
             // Standard token response
             if (data?.token) {
@@ -79,8 +82,10 @@ export async function ensureCopilotApiToken(deps = {}) {
                 _copilotTokenCache = { token: cleanToken, expiry: Date.now() + 1800000 };
                 return cleanToken;
             }
+            _copilotTokenCache = { token: '', expiry: Date.now() + _NEGATIVE_CACHE_MS };
             return '';
         } catch {
+            _copilotTokenCache = { token: '', expiry: Date.now() + _NEGATIVE_CACHE_MS };
             return '';
         } finally {
             _pendingTokenPromise = null;

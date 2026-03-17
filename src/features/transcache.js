@@ -3,7 +3,8 @@
  * 독립 V3 플러그인 (IPC 불필요)
  * RisuAI 번역 캐시 검색·조회, 사용자 수정 사전 관리
  */
-const Risu = window.risuai || window.Risuai;
+export {};
+const Risu = /** @type {any} */ (window.risuai || window.Risuai);
 const LOG = '[CPM TransCache]';
 const PREFIX = 'cpm-transcache';
 const CORRECTIONS_KEY = 'cpm_transcache_corrections';
@@ -33,7 +34,7 @@ async function saveCorrections() {
 }
 
 /* ── Replacement Map ── */
-let _replacementMap = new Map();
+const _replacementMap = new Map();
 let _replacementRegex = null;
 
 function rebuildReplacementMap() {
@@ -68,6 +69,7 @@ if (window._cpmTransCacheCleanup) try { window._cpmTransCacheCleanup(); } catch 
 window._cpmTransCacheCleanup = () => { try { Risu.removeRisuScriptHandler('display', displayHandler); } catch {} };
 
 /* ── Cache API ── */
+/** @type {any[] | null} */
 let _allCacheEntries = null;
 let _cacheLoadedAt = 0;
 const CACHE_TTL = 120000;
@@ -242,7 +244,7 @@ function applySortAndRender(results) {
 const api = {};
 
 api.search = async () => {
-    const inp = document.getElementById(`${PREFIX}-search`);
+    const inp = /** @type {HTMLInputElement} */ (document.getElementById(`${PREFIX}-search`));
     const q = inp ? inp.value.trim() : '';
     if (!q) { showStatus('검색어를 입력하세요.', 'warn'); return; }
     if (_isLoading) return; _isLoading = true;
@@ -300,7 +302,7 @@ api.editEntry = (idx) => {
 
 api.saveEdit = async (idx) => {
     const it = _searchResults[idx]; if (!it) return;
-    const ta = document.getElementById(`${PREFIX}-edit-val`); if (!ta) return;
+    const ta = /** @type {HTMLInputElement} */ (document.getElementById(`${PREFIX}-edit-val`)); if (!ta) return;
     const nv = ta.value;
     if (nv === it.value) {
         if (_corrections[it.key]) { delete _corrections[it.key]; await saveCorrections(); showStatus('✅ 원본과 동일 — 수정 되돌림', 'success'); }
@@ -354,7 +356,7 @@ api.exportCorrections = async () => {
 api.importCache = () => {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json';
     inp.onchange = async (e) => {
-        const f = e.target.files[0]; if (!f) return;
+        const f = /** @type {HTMLInputElement} */ (e.target).files[0]; if (!f) return;
         showStatus('🔄 파일 읽는 중...');
         try {
             const data = JSON.parse(await f.text());
@@ -393,7 +395,7 @@ api.showAddForm = () => {
 };
 
 api.saveNew = async () => {
-    const kEl = document.getElementById(`${PREFIX}-add-key`), vEl = document.getElementById(`${PREFIX}-add-val`);
+    const kEl = /** @type {HTMLInputElement} */ (document.getElementById(`${PREFIX}-add-key`)), vEl = /** @type {HTMLInputElement} */ (document.getElementById(`${PREFIX}-add-val`));
     if (!kEl || !vEl) return;
     const k = kEl.value, v = vEl.value;
     if (!k.trim()) { showStatus('원문 입력 필요', 'warn'); return; }
@@ -513,7 +515,7 @@ async function openUI() {
     resultEl = document.getElementById('result');
     document.getElementById('tc-close').onclick = () => { document.body.innerHTML = ''; Risu.hideContainer(); };
     document.getElementById(`${PREFIX}-toggle`).onchange = (e) => {
-        _displayEnabled = e.target.checked;
+        _displayEnabled = /** @type {HTMLInputElement} */ (e.target).checked;
         Risu.setArgument(ENABLED_ARG_KEY, String(_displayEnabled));
     };
     document.getElementById(`${PREFIX}-search`).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); api.search(); } });

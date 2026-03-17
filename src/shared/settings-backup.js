@@ -165,7 +165,11 @@ export function createSettingsBackup({ Risu, safeGetArg, slotList, getRegistered
         getAllKeys() {
             if (this._allKeys) return this._allKeys;
             const providers = typeof getRegisteredProviders === 'function' ? getRegisteredProviders() : [];
-            this._allKeys = getManagedSettingKeys(providers);
+            this._allKeys = [...new Set([
+                ...BASE_SETTING_KEYS.filter((key) => !/^cpm_slot_/.test(key)),
+                ...getAuxSettingKeys(safeSlots),
+                ...getManagedSettingKeys(providers),
+            ])];
             return this._allKeys;
         },
 

@@ -176,7 +176,7 @@ export function createAnthropicSSEStream(response, abortSignal, config = {}) {
     let thinking = false;
     let showThinkingResolved = false;
     // C-11: Anthropic 토큰 사용량 추적
-    let _accumulatedUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    const _accumulatedUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
     let _visibleText = '';
     let _hasThinking = false;
     return new ReadableStream({
@@ -243,7 +243,7 @@ export function createAnthropicSSEStream(response, abortSignal, config = {}) {
                                         if (config.showThinking) {
                                             let dt = '';
                                             if (!thinking) { thinking = true; dt += '<Thoughts>\n'; }
-                                            dt += '\n[REDACTED]\n';
+                                            dt += '\n{{redacted_thinking}}\n';
                                             controller.enqueue(dt);
                                         }
                                     }
@@ -258,7 +258,7 @@ export function createAnthropicSSEStream(response, abortSignal, config = {}) {
                                         }
                                     } else if (obj.delta?.type === 'redacted_thinking') {
                                         _hasThinking = true;
-                                        if (config.showThinking) { if (!thinking) { thinking = true; dt += '<Thoughts>\n'; } dt += '\n[REDACTED]\n'; }
+                                        if (config.showThinking) { if (!thinking) { thinking = true; dt += '<Thoughts>\n'; } dt += '\n{{redacted_thinking}}\n'; }
                                     } else if (obj.delta?.type === 'text_delta' || obj.delta?.type === 'text') {
                                         if (obj.delta.text) {
                                             if (thinking) { thinking = false; dt += '\n</Thoughts>\n\n'; }
@@ -316,7 +316,7 @@ export function parseGeminiSSELine(line, config = {}) {
         const obj = JSON.parse(line.slice(5).trim());
         const blockReason = obj?.promptFeedback?.blockReason ?? obj?.candidates?.[0]?.finishReason;
         if (blockReason && GEMINI_BLOCK_REASONS.includes(blockReason)) {
-            let msg = config._inThoughtBlock ? '\n</Thoughts>\n\n' : '';
+            const msg = config._inThoughtBlock ? '\n</Thoughts>\n\n' : '';
             config._inThoughtBlock = false;
             return msg + `\n\n[⚠️ Gemini Safety Block: ${blockReason}] ${JSON.stringify(obj.promptFeedback || obj.candidates?.[0]?.safetyRatings || '').substring(0, ERROR_SNIPPET_LENGTH)}`;
         }
@@ -393,7 +393,7 @@ export function parseClaudeNonStreamingResponse(data, config = {}) {
     if (Array.isArray(data.content)) {
         for (const block of data.content) {
             if (block.type === 'thinking') { hasThinking = true; if (config.showThinking && block.thinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; } result += block.thinking; } }
-            else if (block.type === 'redacted_thinking') { hasThinking = true; if (config.showThinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; } result += '\n[REDACTED]\n'; } }
+            else if (block.type === 'redacted_thinking') { hasThinking = true; if (config.showThinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; } result += '\n{{redacted_thinking}}\n'; } }
             else if (block.type === 'text') { if (inThinking) { inThinking = false; result += '\n</Thoughts>\n\n'; } const t = block.text || ''; result += t; visibleText += t; }
         }
     }

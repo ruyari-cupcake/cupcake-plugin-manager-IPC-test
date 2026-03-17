@@ -228,7 +228,9 @@ describe('custom model fetch integration', () => {
         expect(capturedRequest.init.headers.Authorization).toBeUndefined();
         expect(capturedRequest.body.system).toBe('You are helpful.');
         expect(capturedRequest.body.messages.every((m) => m.role !== 'system')).toBe(true);
-        expect(capturedRequest.body.thinking).toEqual({ type: 'adaptive' });
+        // effort without adaptiveThinking toggle → effort-only mode (no thinking block)
+        // Matches _temp_repo behavior: effort alone sets output_config without thinking type
+        expect(capturedRequest.body.thinking).toBeUndefined();
         expect(capturedRequest.body.output_config).toEqual({ effort: 'high' });
         expect(capturedRequest.body.temperature).toBe(0.6);
     });

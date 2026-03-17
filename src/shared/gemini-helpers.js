@@ -22,7 +22,7 @@ export function getGeminiSafetySettings(modelId) {
 export function validateGeminiParams(gc) {
     if (!gc || typeof gc !== 'object') return;
     /** @type {Array<[string, number, number, number | undefined, boolean]>} */
-    const rules = [['temperature', 0, 2, 1, false], ['topP', 0, 1, undefined, false], ['topK', 1, 40, undefined, false], ['frequencyPenalty', -2, 2, undefined, true], ['presencePenalty', -2, 2, undefined, true]];
+    const rules = [['temperature', 0, 2, 1, false], ['topP', 0, 1, undefined, false], ['topK', 1, 64, undefined, false], ['frequencyPenalty', -2, 2, undefined, false], ['presencePenalty', -2, 2, undefined, false]];
     for (const [key, min, max, fb, ex] of rules) {
         // @ts-ignore — GeminiGenerationConfig keys are validated at definition
         if (gc[key] == null) continue;
@@ -32,6 +32,15 @@ export function validateGeminiParams(gc) {
         // @ts-ignore
         if (bad) { if (fb !== undefined) gc[key] = fb; else delete gc[key]; }
     }
+}
+
+/**
+ * 모델이 실험 모델인지 확인
+ * @param {string | null | undefined} modelId
+ * @returns {boolean}
+ */
+export function isExperimentalGeminiModel(modelId) {
+    return !!(modelId && (modelId.includes('exp') || modelId.includes('experimental')));
 }
 
 /**

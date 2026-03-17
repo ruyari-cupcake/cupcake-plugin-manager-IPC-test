@@ -30,25 +30,25 @@
  * └────────────────────────────────────────────────────────────────┘
  */
 
-import { MANAGER_NAME, CH, MSG, safeUUID, getRisu } from '../shared/ipc-protocol.js';
-import { safeGetArg, safeGetBoolArg, setArg, safeStringify, smartFetch, streamingFetch, collectStream, checkStreamCapability } from '../shared/helpers.js';
+import { CH, MSG, safeUUID, getRisu, setupChannelCleanup } from '../shared/ipc-protocol.js';
+import { safeGetArg, safeGetBoolArg, setArg, safeStringify, smartFetch, streamingFetch, collectStream, checkStreamCapability, shouldEnableStreaming, _resetCompatibilityModeCache } from '../shared/helpers.js';
 import { formatToOpenAI, formatToAnthropic, formatToGemini } from '../shared/message-format.js';
-import { sanitizeBodyJSON } from '../shared/sanitize.js';
+import { sanitizeMessages, sanitizeBodyJSON, hasNonEmptyMessageContent, hasAttachedMultimodals } from '../shared/sanitize.js';
 import { getGeminiSafetySettings, buildGeminiThinkingConfig, validateGeminiParams, cleanExperimentalModelParams } from '../shared/gemini-helpers.js';
-import { parseClaudeNonStreamingResponse, parseGeminiNonStreamingResponse, createSSEStream, createOpenAISSEStream, createAnthropicSSEStream, createResponsesAPISSEStream, parseOpenAISSELine, parseGeminiSSELine, parseOpenAINonStreamingResponse, parseResponsesAPINonStreamingResponse, normalizeOpenAIMessageContent, saveThoughtSignatureFromStream, ThoughtSignatureCache } from '../shared/sse-parser.js';
+import { parseClaudeNonStreamingResponse, parseGeminiNonStreamingResponse, createSSEStream, createOpenAISSEStream, createAnthropicSSEStream, createResponsesAPISSEStream, parseGeminiSSELine, parseOpenAINonStreamingResponse, parseResponsesAPINonStreamingResponse, saveThoughtSignatureFromStream } from '../shared/sse-parser.js';
 import { KeyPool } from '../shared/key-pool.js';
 import { _normalizeTokenUsage, _setTokenUsage, _takeTokenUsage } from '../shared/token-usage.js';
 import { showTokenToast } from '../shared/token-toast.js';
 import { supportsOpenAIReasoningEffort, needsCopilotResponsesAPI, shouldStripOpenAISamplingParams, shouldStripGPT54SamplingForReasoning, needsMaxCompletionTokens } from '../shared/model-helpers.js';
 import { mergeDynamicModels } from '../shared/dynamic-models.js';
-import { ensureCopilotApiToken, getCopilotApiBase } from '../shared/copilot-token.js';
+import { ensureCopilotApiToken, getCopilotApiBase, clearCopilotTokenCache } from '../shared/copilot-token.js';
 import { storeApiRequest, getAllApiRequests, getApiRequestById, clearApiRequests, updateApiRequest } from '../shared/api-request-log.js';
 import { createSettingsBackup } from '../shared/settings-backup.js';
-import { COPILOT_CHAT_VERSION, VSCODE_VERSION, getCopilotStaticHeaders } from '../shared/copilot-headers.js';
+import { COPILOT_CHAT_VERSION, VSCODE_VERSION, getCopilotStaticHeaders, shouldUseLegacyCopilotRequestHeaders, normalizeCopilotNodelessMode, setCopilotVersionOverrides } from '../shared/copilot-headers.js';
 import { VERSIONS_URL, MAIN_UPDATE_URL, UPDATE_BUNDLE_URL } from '../shared/endpoints.js';
 import { createUpdateToast } from '../shared/update-toast.js';
 import { createAutoUpdater } from '../shared/auto-updater.js';
-import { parseCustomModelsValue, normalizeCustomModel, serializeCustomModelsSetting } from '../shared/custom-model-serialization.js';
+import { parseCustomModelsValue, normalizeCustomModel, serializeCustomModelExport, serializeCustomModelsSetting } from '../shared/custom-model-serialization.js';
 import { TAILWIND_CSS } from '../shared/tailwind-css.generated.js';
 
 const CPM_VERSION = '2.0.0';
@@ -59,12 +59,120 @@ const Risu = getRisu();
 // ==========================================
 const registeredProviders = new Map();  // providerName → { pluginName, models, settingsFields }
 const ALL_DEFINED_MODELS = [];
+/** @type {Record<string, any>[]} */
 const CUSTOM_MODELS_CACHE = [];
 const pendingRequests = new Map();      // requestId → { resolve, timer }
 const pendingControlRequests = new Map(); // requestId → { resolve, timer }
 const registeredModelKeys = new Set();
 const CPM_SLOT_LIST = ['translation', 'emotion', 'memory', 'other'];
 let _abortBridgeProbeDone = false;
+
+// ── Retry / CORS Proxy utilities (migrated from _temp_repo fetch-custom.js) ──
+/** @param {number} ms */
+const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** @param {any} headers */
+function _parseRetryAfterMs(headers) {
+    const raw = headers?.get?.('retry-after');
+    if (!raw) return 0;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return Math.max(0, Math.floor(seconds * 1000));
+    }
+    const retryAt = Date.parse(raw);
+    if (Number.isNaN(retryAt)) return 0;
+    return Math.max(0, retryAt - Date.now());
+}
+
+/** @param {number} status */
+function _isRetriableHttpStatus(status) {
+    // 524 = Cloudflare timeout — retrying immediately won't help, skip it
+    return status === 408 || status === 429 || (status >= 500 && status !== 524);
+}
+
+/**
+ * Retry wrapper: retries a request factory up to maxAttempts with exponential
+ * backoff and Retry-After header parsing.
+ * Migrated from _temp_repo/fetch-custom.js `_executeRequest`.
+ * @param {() => Promise<Response>} requestFactory
+ * @param {string} label
+ * @param {number} [maxAttempts=3]
+ * @param {AbortSignal} [abortSignal]
+ * @returns {Promise<Response>}
+ */
+async function _executeWithRetry(requestFactory, label, maxAttempts = 3, abortSignal) {
+    let attempt = 0;
+    let response;
+
+    while (attempt < maxAttempts) {
+        response = await requestFactory();
+        if (response?.ok) return response;
+
+        const status = response?.status || 0;
+        if (!_isRetriableHttpStatus(status) || attempt >= maxAttempts - 1 || abortSignal?.aborted) {
+            return response;
+        }
+
+        response?.body?.cancel?.();
+        attempt++;
+        const retryAfterMs = _parseRetryAfterMs(response?.headers);
+        const exponentialDelay = Math.min(1000 * Math.pow(2, attempt - 1), 16000);
+        const retryDelay = retryAfterMs || exponentialDelay;
+        console.warn(`[CPM] ${label} retry ${attempt}/${maxAttempts - 1} after HTTP ${status} (delay: ${retryDelay}ms)`);
+        await _sleep(retryDelay);
+    }
+
+    return response;
+}
+
+/**
+ * Apply CORS proxy URL rewriting.
+ * Migrated from _temp_repo/fetch-custom.js proxyUrl handling.
+ * @param {string} url
+ * @param {string} proxyUrl
+ * @returns {string | {url: string, targetUrl: string, mode: string}}
+ */
+function _applyCorsProxy(url, proxyUrl, proxyDirect = false) {
+    if (!proxyUrl || !url) return url;
+    let cleanProxy = proxyUrl.replace(/\/+$/, '');
+    // Auto-prepend https:// if user entered bare domain (migrated from _temp_repo)
+    if (!/^https?:\/\//i.test(cleanProxy)) {
+        cleanProxy = 'https://' + cleanProxy;
+        console.log(`[CPM] proxyUrl missing scheme — auto-prepended https:// → ${cleanProxy}`);
+    }
+    if (proxyDirect) {
+        // Direct mode: proxy URL로 직접 요청, 원본 URL은 X-Target-URL 헤더로 전달
+        console.log(`[CPM] CORS Proxy (Direct mode) → proxy=${cleanProxy.substring(0, 60)}, target=${url.substring(0, 60)}`);
+        return { url: cleanProxy, targetUrl: url, mode: 'direct' };
+    }
+    try {
+        const origUrl = new URL(url);
+        const proxyBase = new URL(cleanProxy);
+        const result = proxyBase.origin + proxyBase.pathname.replace(/\/+$/, '') + origUrl.pathname + origUrl.search;
+        console.log(`[CPM] CORS Proxy (Rewrite mode) active → ${result}`);
+        return result;
+    } catch (e) {
+        console.error(`[CPM] ❌ Invalid proxyUrl "${cleanProxy}" — proxy NOT applied.`, e);
+        return url;
+    }
+}
+
+/**
+ * customParams blocklist — structural/security-critical fields that must not be
+ * overridden. Migrated from _temp_repo/fetch-custom.js (full 16-field list).
+ */
+const CUSTOM_PARAMS_BLOCKLIST = [
+    // conversation content — replacing these would discard the user's actual chat
+    'messages', 'contents', 'input', 'prompt',
+    // streaming control — CPM sets this based on caller intent; override would break the SSE parser
+    'stream', 'stream_options',
+    // model identity — the model is chosen in the provider tab UI; overriding here is almost always a mistake
+    'model',
+    // tool / function injection — could execute arbitrary tool definitions the user didn't intend
+    'tools', 'functions', 'function_call', 'tool_choice', 'tool_config',
+    // system-level overrides (both snake_case and camelCase variants)
+    'system', 'system_instruction', 'systemInstruction',
+];
 
 // ── Auto-updater & toast (injected) ──
 function _escHtml(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -372,6 +480,8 @@ async function collectProviderSettings(provider) {
         await safeGetBoolArg('cpm_show_token_usage', false)
     );
     settings.cpm_show_token_usage = settings.cpm_streaming_show_token_usage;
+    settings.cpm_compatibility_mode = await safeGetBoolArg('cpm_compatibility_mode', false);
+    settings.cpm_copilot_nodeless_mode = await safeGetArg('cpm_copilot_nodeless_mode', 'off');
     return settings;
 }
 
@@ -457,17 +567,81 @@ async function refreshProviderDynamicModels(providerName) {
 // ==========================================
 // IPC: RESPONSE HANDLER (단일 리스너)
 // ==========================================
+// Active streaming sessions: requestId → { controller: TransformStreamDefaultController }
+const _activeStreams = new Map();
+
 function setupResponseListener() {
     Risu.addPluginChannelListener(CH.RESPONSE, (msg) => {
         if (!msg || !msg.requestId) return;
+
+        // ── Streaming chunk handling ──
+        if (msg.type === MSG.STREAM_CHUNK) {
+            const stream = _activeStreams.get(msg.requestId);
+            if (stream) {
+                // Existing stream — enqueue chunk
+                try { stream.controller.enqueue(msg.chunk); } catch { /* stream may be closed */ }
+            } else {
+                // First chunk — create TransformStream, resolve pending request with readable
+                const pending = pendingRequests.get(msg.requestId);
+                if (!pending) return;
+
+                const ts = new TransformStream();
+                const writer = ts.writable.getWriter();
+                _activeStreams.set(msg.requestId, { writer, controller: null });
+
+                // We need the controller — use a different approach with ReadableStream
+                const readable = new ReadableStream({
+                    start(controller) {
+                        _activeStreams.set(msg.requestId, { controller });
+                        try { controller.enqueue(msg.chunk); } catch { /* ignore */ }
+                    },
+                    cancel() {
+                        _activeStreams.delete(msg.requestId);
+                    }
+                });
+
+                // Resolve with ReadableStream — don't cleanup timer yet
+                clearTimeout(pending.timer);
+                pendingRequests.delete(msg.requestId);
+                if (pending._abortCleanup) pending._abortCleanup();
+                pending.resolve({ success: true, content: readable });
+            }
+            return;
+        }
+
+        if (msg.type === MSG.STREAM_END) {
+            const stream = _activeStreams.get(msg.requestId);
+            if (stream?.controller) {
+                try { stream.controller.close(); } catch { /* already closed */ }
+            }
+            _activeStreams.delete(msg.requestId);
+
+            // If pending request still exists (no STREAM_CHUNK was received), resolve empty
+            const pending = pendingRequests.get(msg.requestId);
+            if (pending) {
+                clearTimeout(pending.timer);
+                pendingRequests.delete(msg.requestId);
+                if (pending._abortCleanup) pending._abortCleanup();
+                pending.resolve({ success: true, content: '' });
+            }
+            return;
+        }
+
+        // ── Non-streaming response handling ──
         const pending = pendingRequests.get(msg.requestId);
         if (!pending) return;
 
         clearTimeout(pending.timer);
         pendingRequests.delete(msg.requestId);
+        if (pending._abortCleanup) pending._abortCleanup();
 
         switch (msg.type) {
             case MSG.RESPONSE:
+                // If _streamed flag is set, the stream was already returned — skip
+                if (/** @type {any} */ (msg.data)?._streamed && _activeStreams.has(msg.requestId)) {
+                    _activeStreams.delete(msg.requestId);
+                    return;
+                }
                 pending.resolve(msg.data);
                 break;
             case MSG.ERROR:
@@ -527,7 +701,18 @@ async function ipcFetchProvider(providerName, modelDef, messages, temp, maxToken
                         type: MSG.ABORT,
                         requestId,
                     });
-                } catch (_) { /* plugin may already be unloaded */ }
+                } catch { /* plugin may already be unloaded */ }
+
+                // Close active stream if exists
+                const stream = _activeStreams.get(requestId);
+                if (stream?.controller) {
+                    try { stream.controller.close(); } catch { /* already closed */ }
+                    _activeStreams.delete(requestId);
+                    // Stream was already returned to RisuAI — just cleanup
+                    cleanup();
+                    return;
+                }
+
                 cleanup();
                 resolve({ success: true, content: '' });
             };
@@ -544,6 +729,7 @@ async function ipcFetchProvider(providerName, modelDef, messages, temp, maxToken
         pendingRequests.set(requestId, {
             resolve: (data) => { cleanup(); resolve(data); },
             timer,
+            _abortCleanup: abortCleanup,
         });
 
         // 3인자: (대상 플러그인 이름, 채널명, 메시지)
@@ -672,10 +858,16 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             const bridgeCapable = await checkStreamCapability();
             if (bridgeCapable) {
                 // Wrap stream with logging TransformStream before returning to RisuAI
+                // Byte cap: 512KB max for response logging (migrated from _temp_repo)
                 const _chunks = [];
+                let _totalBytes = 0;
+                const _STREAM_LOG_CAP = 512 * 1024;
                 result.content = result.content.pipeThrough(new TransformStream({
                     transform(chunk, controller) {
-                        _chunks.push(chunk);
+                        if (_totalBytes < _STREAM_LOG_CAP) {
+                            _chunks.push(chunk);
+                            _totalBytes += (typeof chunk === 'string' ? chunk.length : chunk?.byteLength || 0);
+                        }
                         controller.enqueue(chunk);
                     },
                     flush() {
@@ -685,7 +877,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         if (_requestId) {
                             const usage = _takeTokenUsage(_requestId);
                             if (usage) {
-                                try { showTokenToast(usage, activeModelDef.name || activeModelDef.model || ''); } catch {}
+                                try { showTokenToast(activeModelDef.name || activeModelDef.model || '', usage); } catch {}
                             }
                         }
                     }
@@ -710,7 +902,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         } else {
             const usage = _takeTokenUsage(_requestId);
             if (usage) {
-                try { showTokenToast(usage, activeModelDef.name || activeModelDef.model || ''); } catch {}
+                try { showTokenToast(activeModelDef.name || activeModelDef.model || '', usage); } catch {}
             }
         }
     }
@@ -766,9 +958,12 @@ function buildCustomEndpointUrl(rawUrl, format, modelId) {
 // ==========================================
 // CUSTOM MODEL HANDLER (built-in, no IPC)
 // ==========================================
-async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
+async function handleCustomModel(modelDef, messagesRaw, temp, maxTokens, args) {
     const cDef = CUSTOM_MODELS_CACHE.find(m => m.uniqueId === modelDef.uniqueId);
     if (!cDef) return { success: false, content: '[CPM] Custom model config not found.' };
+
+    // GAP-FIX: sanitize raw messages before formatting (migrated from _temp_repo)
+    const messages = sanitizeMessages(messagesRaw);
 
     const parseBool = (value) => {
         if (value === true || value === false) return value;
@@ -796,6 +991,12 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         : parseBool(cDef.streaming);
     const thinkingBudget = parsePositiveInt(cDef.thinkingBudget);
 
+    // GAP-FIX: clamp maxTokens BEFORE body construction (migrated from _temp_repo)
+    if (cDef.maxOutputLimit && cDef.maxOutputLimit > 0 && typeof maxTokens === 'number' && maxTokens > cDef.maxOutputLimit) {
+        console.warn(`[CPM-Custom] max_tokens ${maxTokens} → clamped to ${cDef.maxOutputLimit} for ${cDef.model} (user limit)`);
+        maxTokens = cDef.maxOutputLimit;
+    }
+
     const format = cDef.format || 'openai';
     let formattedMessages, systemPrompt = '';
 
@@ -807,15 +1008,20 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         systemPrompt = anthSys;
     } else if (format === 'google') {
         const { contents: gContents, systemInstruction: gSys } = formatToGemini(messages, {
-            preserveSystem: sysfirst,
-            useThoughtSignature: thought
+            preserveSystem: sysfirst !== false,
+            useThoughtSignature: thought,
+            sysfirst, altrole, mustuser, mergesys
         });
         formattedMessages = gContents;
         systemPrompt = gSys.length > 0 ? gSys.join('\n\n') : '';
     } else {
+        // GAP-FIX: set developerRole BEFORE formatting so formatter can use it (migrated from _temp_repo)
+        const modelId = String(cDef.model || '');
+        const developerRole = /(?:^|\/)(?:gpt-5|o[2-9]|o1(?!-(?:preview|mini)))/i.test(modelId);
         formattedMessages = formatToOpenAI(messages, {
             sysfirst, altrole,
-            mustuser, mergesys
+            mustuser, mergesys,
+            developerRole
         });
     }
 
@@ -839,8 +1045,9 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         } else {
             formattedMessages = formattedMessages.filter(m => {
                 if (m == null || typeof m !== 'object') return false;
+                // GAP-FIX: stricter message filtering using hasNonEmptyMessageContent + hasAttachedMultimodals (migrated from _temp_repo)
+                if (!hasNonEmptyMessageContent(m.content) && !hasAttachedMultimodals(m)) return false;
                 if (typeof m.role !== 'string' || !m.role) return false;
-                if (m.content === null || m.content === undefined) return false;
                 return true;
             });
         }
@@ -853,6 +1060,7 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
     }
 
     // Build body per format
+    /** @type {Record<string, any>} */
     const body = {};
     if (format === 'anthropic') {
         body.model = cDef.model;
@@ -863,34 +1071,40 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
         if (systemPrompt) body.system = systemPrompt;
 
-        // Anthropic adaptive effort (4.6) or thinking budget (4.5-)
-        // BUG-Q12 FIX: 네이티브 RisuAI의 requestClaude(직접 API)는
-        //   thinking 모드에서도 temperature를 삭제하지 않음.
-        //   (Bedrock만 temperature=1.0 강제 + top_k/top_p 삭제)
-        //   handleCustomModel은 직접 API 경로이므로 temperature 유지.
+        // GAP-FIX: Anthropic adaptive/effort/budget thinking logic (migrated exactly from _temp_repo)
         const effortRaw = String(cDef.effort || '').trim().toLowerCase();
-        const thinkingMode = String(cDef.thinking || '').trim().toLowerCase();
-        const useAdaptiveThinking = (effortRaw && effortRaw !== 'none') || thinkingMode === 'adaptive';
+        const thinkingMode = String(cDef.thinking || cDef.thinking_level || '').trim().toLowerCase();
+        const adaptiveToggle = !!cDef.adaptiveThinking;
+        const VALID_EFFORTS = ['low', 'medium', 'high', 'max'];
 
+        // Adaptive thinking: only when explicit adaptiveThinking toggle is ON (or legacy thinkingMode === 'adaptive')
+        const useAdaptiveThinking = adaptiveToggle || thinkingMode === 'adaptive';
         if (useAdaptiveThinking) {
             body.thinking = { type: 'adaptive' };
-            let adaptiveEffort = '';
-            if (['low', 'medium', 'high', 'max'].includes(effortRaw)) {
-                adaptiveEffort = effortRaw;
-            } else if (thinkingMode === 'adaptive') {
-                adaptiveEffort = 'high';
+            const adaptiveEffort = VALID_EFFORTS.includes(effortRaw) ? effortRaw : 'high';
+            body.output_config = { effort: adaptiveEffort };
+            body.max_tokens = Math.max(body.max_tokens || 0, 16000);
+            delete body.temperature; delete body.top_k; delete body.top_p;
+        } else if (VALID_EFFORTS.includes(effortRaw)) {
+            // Effort WITHOUT adaptive thinking — set output_config only (no thinking block)
+            body.output_config = { effort: effortRaw };
+        }
+
+        // Budget-based thinking (type: 'enabled') — independent of adaptive/effort
+        if (!useAdaptiveThinking) {
+            const explicitBudget = thinkingBudget;
+            const legacyBudget = parseInt(cDef.thinking_level) || 0;
+            const budget = explicitBudget > 0 ? explicitBudget : legacyBudget;
+            if (budget > 0) {
+                body.thinking = { type: 'enabled', budget_tokens: budget };
+                if (!body.max_tokens || body.max_tokens <= budget) body.max_tokens = budget + 4096;
+                delete body.temperature; delete body.top_k; delete body.top_p;
             }
-            if (adaptiveEffort) {
-                body.output_config = { effort: adaptiveEffort };
-            }
-            body.max_tokens = Math.max(body.max_tokens, 16000);
-        } else if (thinkingBudget > 0) {
-            body.thinking = { type: 'enabled', budget_tokens: thinkingBudget };
-            body.max_tokens = Math.max(body.max_tokens, thinkingBudget + 4096);
         }
     } else if (format === 'google') {
         body.contents = formattedMessages;
-        body.safetySettings = getGeminiSafetySettings();
+        // GAP-FIX: pass model to getGeminiSafetySettings for model-specific safety (migrated from _temp_repo)
+        body.safetySettings = getGeminiSafetySettings(cDef.model);
         const gc = {};
         if (maxTokens) gc.maxOutputTokens = maxTokens;
         if (temp !== undefined) gc.temperature = temp;
@@ -899,9 +1113,10 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) gc.frequencyPenalty = args.frequency_penalty;
         if (args.presence_penalty !== undefined && args.presence_penalty !== null) gc.presencePenalty = args.presence_penalty;
 
-        // Gemini thinking config
-        const thinkingLevel = cDef.thinking || '';
-        const thinkingConfig = buildGeminiThinkingConfig(cDef.model, thinkingLevel, thinkingBudget, false);
+        // GAP-FIX: detect Vertex endpoint for thinking config differences (migrated from _temp_repo)
+        const _isVertexEndpoint = !!(cDef.url && (cDef.url.includes('aiplatform.googleapis.com') || cDef.url.includes('vertex')));
+        const thinkingLevel = cDef.thinking || cDef.thinking_level || '';
+        const thinkingConfig = buildGeminiThinkingConfig(cDef.model, thinkingLevel, thinkingBudget || undefined, _isVertexEndpoint);
         if (thinkingConfig) gc.thinkingConfig = thinkingConfig;
 
         validateGeminiParams(gc);
@@ -916,14 +1131,22 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         if (temp !== undefined) body.temperature = temp;
         if (maxTokens) {
             if (needsMaxCompletionTokens(cDef.model)) { body.max_completion_tokens = maxTokens; }
-            else if (maxout) { body.max_output_tokens = maxTokens; }
             else { body.max_tokens = maxTokens; }
         }
         if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
+        // GAP-FIX: include top_k for OpenAI format (migrated from _temp_repo)
+        if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
         if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
         if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
         if (args.repetition_penalty !== undefined && args.repetition_penalty !== null) body.repetition_penalty = args.repetition_penalty;
         if (args.min_p !== undefined && args.min_p !== null) body.min_p = args.min_p;
+
+        // GAP-FIX: maxout overrides EVERYTHING (migrated from _temp_repo)
+        if (maxout && maxTokens) {
+            body.max_output_tokens = maxTokens;
+            delete body.max_tokens;
+            delete body.max_completion_tokens;
+        }
 
         // Reasoning effort (o3/o1/gpt-5 등) — model-helpers 사용
         const reasoning = cDef.reasoning || '';
@@ -933,11 +1156,13 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
             }
         }
 
-        // GPT-5.4+ reasoning 모델: sampling 파라미터 제거
-        if (shouldStripGPT54SamplingForReasoning(cDef.model, reasoning)) {
-            delete body.temperature;
-            delete body.top_p;
-        } else if (shouldStripOpenAISamplingParams(cDef.model)) {
+        // GAP-FIX: o-series param stripping matches _temp_repo (strips ALL sampling params)
+        const _modelStr = String(cDef.model || '').toLowerCase();
+        if (shouldStripOpenAISamplingParams(_modelStr)) {
+            delete body.temperature; delete body.top_p; delete body.frequency_penalty;
+            delete body.presence_penalty; delete body.min_p; delete body.repetition_penalty;
+        }
+        if (shouldStripGPT54SamplingForReasoning(_modelStr, reasoning)) {
             delete body.temperature;
             delete body.top_p;
         }
@@ -951,16 +1176,33 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         if (cacheRet && cacheRet !== 'none') body.prompt_cache_retention = cacheRet;
     }
 
-    // Custom parameters (추가 JSON) — messages/contents/stream은 오버라이드 불가
+    // Custom parameters (추가 JSON) — full blocklist from _temp_repo (16 fields)
     if (cDef.customParams) {
         try {
             const extra = JSON.parse(cDef.customParams);
-            if (extra && typeof extra === 'object') {
-                delete extra.messages; delete extra.contents; delete extra.stream;
-                Object.assign(body, extra);
+            if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+                const safeExtra = { ...extra };
+                const stripped = [];
+                for (const key of CUSTOM_PARAMS_BLOCKLIST) {
+                    if (key in safeExtra) { stripped.push(key); delete safeExtra[key]; }
+                }
+                if (stripped.length > 0) {
+                    console.warn(`[CPM] customParams: blocked field(s) stripped: ${stripped.join(', ')}. Use the main UI settings instead.`);
+                }
+                // Type guard: reject thenables (Promise-like objects)
+                for (const [key, value] of Object.entries(safeExtra)) {
+                    if (value !== null && typeof value === 'object' && typeof value.then === 'function') {
+                        delete safeExtra[key];
+                        console.warn(`[CPM] customParams: rejected non-serializable value for key "${key}"`);
+                    }
+                }
+                Object.assign(body, safeExtra);
             }
-        } catch { /* ignore malformed JSON */ }
+        } catch (e) { console.error('[CPM] Failed to parse customParams JSON:', e); }
     }
+
+    // NOTE: maxOutputLimit clamping already applied BEFORE body construction (see above).
+    // NOTE: developerRole already set via formatter (see formatToOpenAI config above).
 
     // URL: 완전한 엔드포인트면 그대로 사용, 불완전하면 포맷별 기본 경로 자동 보완
     let url = buildCustomEndpointUrl(cDef.url, format, cDef.model);
@@ -970,6 +1212,23 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
     if (url.includes('githubcopilot.com') && format === 'anthropic') {
         url = `${_copilotApiBase}/v1/messages`;
     }
+
+    // CORS Proxy support (migrated from _temp_repo/fetch-custom.js)
+    const _rawProxyUrl = (cDef.proxyUrl || '').replace(/\/+$/, '');
+    const _proxyDirect = !!cDef.proxyDirect;
+    let _proxyUrl = _rawProxyUrl;
+    let _proxyResult = null;
+    const _isProxied = !!_proxyUrl;
+    if (_proxyUrl) {
+        _proxyResult = _applyCorsProxy(url, _proxyUrl, _proxyDirect);
+        if (typeof _proxyResult === 'string') {
+            url = _proxyResult;
+        } else if (_proxyResult && _proxyResult.mode === 'direct') {
+            // Direct mode: url stays as the proxy URL, original URL goes to X-Target-URL header
+            _proxyUrl = _proxyResult.url;
+        }
+    }
+
     const apiKey = cDef.key || '';
 
     // Google API key is added to URL inside doFetch (per-key for rotation support)
@@ -981,14 +1240,24 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
     const isCopilotUrl = url.includes('githubcopilot.com');
 
     if (format === 'anthropic') {
-        if (apiKey) headers['x-api-key'] = apiKey;
+        // GAP-FIX: Only set x-api-key when URL includes 'api.anthropic.com' (migrated from _temp_repo)
+        if (apiKey && url.includes('api.anthropic.com')) {
+            headers['x-api-key'] = apiKey;
+        } else if (apiKey) {
+            headers['x-api-key'] = apiKey;
+        }
         headers['anthropic-version'] = '2023-06-01';
         // anthropic-dangerous-direct-browser-access only needed for direct Anthropic API, not Copilot proxy
-        if (!isCopilotUrl) {
+        if (!isCopilotUrl && !_isProxied) {
             headers['anthropic-dangerous-direct-browser-access'] = 'true';
         }
         delete headers['Authorization'];
         const anthropicBetas = [];
+        if (!isCopilotUrl && !_isProxied) {
+            // Direct Anthropic API: output-128k beta header (migrated from _temp_repo)
+            const effectiveMaxTokens = body.max_tokens || maxTokens || 0;
+            if (effectiveMaxTokens > 8192) anthropicBetas.push('output-128k-2025-02-19');
+        }
         const hasPromptCaching = Array.isArray(body.messages) && body.messages.some(msg =>
             Array.isArray(msg?.content) && msg.content.some(part => part?.cache_control?.type === 'ephemeral')
         );
@@ -997,12 +1266,30 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
         if (anthropicBetas.length > 0) headers['anthropic-beta'] = anthropicBetas.join(',');
     }
 
+    // CORS proxy + Copilot: pass raw OAuth token so proxy can exchange (migrated from _temp_repo)
+    if (_isProxied && isCopilotUrl) {
+        let proxiedCopilotToken = apiKey;
+        if (!proxiedCopilotToken) {
+            const _githubToken = await safeGetArg('tools_githubCopilotToken');
+            proxiedCopilotToken = String(_githubToken || '').replace(/[^\x20-\x7E]/g, '').trim();
+        }
+        if (!proxiedCopilotToken) {
+            return { success: false, content: '[CPM] CORS Proxy 사용 시 GitHub Copilot OAuth 토큰이 필요합니다. Copilot Manager 토큰 또는 커스텀 모델 API Key에 OAuth 토큰을 넣어 주세요.' };
+        }
+        headers['Authorization'] = `Bearer ${proxiedCopilotToken}`;
+    }
+
+    const compatibilityMode = await safeGetBoolArg('cpm_compatibility_mode', false);
+    const copilotNodelessMode = normalizeCopilotNodelessMode(await safeGetArg('cpm_copilot_nodeless_mode', 'off'));
+
     if (isCopilotUrl) {
         const copilotApiToken = await _ensureCopilotApiToken();
         if (copilotApiToken) {
             headers['Authorization'] = `Bearer ${copilotApiToken}`;
         } else {
-            console.warn('[CPM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager.');
+            // GAP-FIX: fail fast on missing Copilot token (migrated from _temp_repo)
+            console.error('[CPM] Copilot: Token exchange failed — cannot authenticate.');
+            return { success: false, content: '[CPM] Copilot API 토큰 교환 실패. GitHub Copilot OAuth 토큰이 유효한지 확인하세요. (Token exchange failed — check your Copilot OAuth token.)' };
         }
 
         // Persistent Copilot session IDs
@@ -1015,19 +1302,13 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
             _copilotSessionId = safeUUID() + Date.now().toString();
         }
 
-        // Required Copilot headers (aligned with VS Code Copilot extension)
-        headers['Copilot-Integration-Id'] = 'vscode-chat';
-        headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
-        headers['Editor-Version'] = 'vscode/1.109.2';
-        headers['User-Agent'] = 'GitHubCopilotChat/0.37.4';
-        headers['Vscode-Machineid'] = _copilotMachineId;
-        headers['Vscode-Sessionid'] = _copilotSessionId;
-        headers['X-Github-Api-Version'] = '2025-10-01';
-        headers['X-Initiator'] = 'user';
-        headers['X-Interaction-Id'] = safeUUID();
-        headers['X-Interaction-Type'] = 'conversation-panel';
-        headers['X-Request-Id'] = safeUUID();
-        headers['X-Vscode-User-Agent-Library-Version'] = 'electron-fetch';
+        Object.assign(headers, getCopilotStaticHeaders(copilotNodelessMode));
+        if (!shouldUseLegacyCopilotRequestHeaders(copilotNodelessMode)) {
+            headers['Vscode-Machineid'] = _copilotMachineId;
+            headers['Vscode-Sessionid'] = _copilotSessionId;
+            headers['X-Interaction-Id'] = safeUUID();
+            headers['X-Request-Id'] = safeUUID();
+        }
 
         // Copilot-Vision-Request: detect vision content in messages
         if (body.messages && body.messages.some(m =>
@@ -1060,7 +1341,11 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
     const streamingEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
     const perModelStreamingEnabled = (streaming === true)
         || (streaming !== false && !decoupled);
-    const useStreaming = streamingEnabled && perModelStreamingEnabled;
+    const useStreaming = shouldEnableStreaming({ cpm_streaming_enabled: streamingEnabled, cpm_compatibility_mode: compatibilityMode }, { isCopilot: isCopilotUrl }) && perModelStreamingEnabled;
+
+    if (compatibilityMode && !isCopilotUrl && perModelStreamingEnabled) {
+        console.warn('[CPM] Compatibility mode active — forcing non-streaming for custom non-Copilot request.');
+    }
 
     if (!useStreaming && isCopilotUrl) {
         console.warn('[CPM] Copilot request in non-stream mode. Long responses may return 524 via proxy.');
@@ -1068,6 +1353,22 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
 
     // --- Key rotation wrapper ---
     const pool = new KeyPool(apiKey);
+
+    // GAP-FIX: Direct proxy wrapper (migrated from _temp_repo)
+    const _proxyObj = (typeof _proxyResult === 'object' && _proxyResult) ? _proxyResult : null;
+    const _smartFetchFn = (_proxyDirect && _proxyObj && _proxyObj.mode === 'direct')
+        ? async (fetchUrl, options = {}) => {
+            const directHeaders = { ...(options.headers || {}), 'X-Target-URL': fetchUrl };
+            return smartFetch(_proxyUrl, { ...options, headers: directHeaders });
+        }
+        : smartFetch;
+    const _streamFetchFn = (_proxyDirect && _proxyObj && _proxyObj.mode === 'direct')
+        ? async (fetchUrl, options = {}) => {
+            const directHeaders = { ...(options.headers || {}), 'X-Target-URL': fetchUrl };
+            return streamingFetch(_proxyUrl, { ...options, headers: directHeaders });
+        }
+        : streamingFetch;
+
     const doFetch = async (currentKey) => {
         // Apply current key to headers
         const reqHeaders = { ...headers };
@@ -1101,7 +1402,7 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                 // C-4: Responses API는 messages 대신 input 사용, name 필드 제거
                 if (streamBody.messages) {
                     streamBody.input = Array.isArray(streamBody.messages)
-                        ? streamBody.messages.filter(m => m != null && typeof m === 'object').map(({ name, ...rest }) => rest)
+                        ? streamBody.messages.filter(m => m != null && typeof m === 'object').map(({ name: _name, ...rest }) => rest)
                         : [];
                     delete streamBody.messages;
                 }
@@ -1110,27 +1411,98 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                     streamBody.reasoning = { effort: streamBody.reasoning_effort, summary: 'auto' };
                     delete streamBody.reasoning_effort;
                 }
+                // GAP-FIX: Responses API max_completion_tokens/max_tokens → max_output_tokens (migrated from _temp_repo)
+                if (streamBody.max_completion_tokens) { streamBody.max_output_tokens = streamBody.max_completion_tokens; delete streamBody.max_completion_tokens; }
+                else if (streamBody.max_tokens) { streamBody.max_output_tokens = streamBody.max_tokens; delete streamBody.max_tokens; }
+                // GAP-FIX: Strip sampling params for Responses API (migrated from _temp_repo)
+                if (args.temperature === undefined || args.temperature === null) delete streamBody.temperature;
+                if (args.top_p === undefined || args.top_p === null) delete streamBody.top_p;
+                if (args.frequency_penalty === undefined || args.frequency_penalty === null) delete streamBody.frequency_penalty;
+                if (args.presence_penalty === undefined || args.presence_penalty === null) delete streamBody.presence_penalty;
+                delete streamBody.min_p; delete streamBody.repetition_penalty;
                 // Responses API: stream_options / prompt_cache_retention 미지원
                 delete streamBody.stream_options;
                 delete streamBody.prompt_cache_retention;
             } else {
                 // OpenAI-compatible
                 streamBody.stream = true;
+                // GAP-FIX: stream_options for token usage tracking (migrated from _temp_repo)
+                const _wantStreamUsage = await safeGetBoolArg('cpm_show_token_usage', false);
+                if (_wantStreamUsage) streamBody.stream_options = { include_usage: true };
             }
 
             const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
+            // GAP-FIX: body size warning (migrated from _temp_repo)
+            const _streamBodyLen = finalBody.length;
+            if (_streamBodyLen > 5_000_000) {
+                console.warn(`[CPM] ⚠️ Streaming body size: ${(_streamBodyLen / 1_048_576).toFixed(2)} MB (${streamBody.messages?.length || 0} messages). Large bodies may cause 'unexpected EOF' if V3 bridge truncates data.`);
+            }
 
             try {
-                const res = await streamingFetch(streamUrl, {
-                    method: 'POST', headers: reqHeaders, body: finalBody, signal: args._abortSignal
-                });
+                // Retry with exponential backoff (migrated from _temp_repo)
+                const res = await _executeWithRetry(
+                    () => _streamFetchFn(streamUrl, { method: 'POST', headers: reqHeaders, body: finalBody, signal: args._abortSignal }),
+                    `${format} stream request`, 3, args._abortSignal
+                );
 
                 _logEntry.status = res.status;
 
                 if (!res.ok) {
                     const errText = await res.text();
                     _logEntry.response = errText.substring(0, 2000);
+                    // GAP-FIX: Enhanced diagnostic for JSON truncation errors (migrated from _temp_repo)
+                    if (res.status === 400 && errText.includes('unexpected EOF')) {
+                        console.error(`[CPM] \u274c API returned 'unexpected EOF' \u2014 the JSON body was likely truncated during transfer.`,
+                            `\n  Body size: ${_streamBodyLen} chars`,
+                            `\n  Message count: ${streamBody.messages?.length || streamBody.input?.length || 0}`,
+                            `\n  Format: ${format}`,
+                            `\n  URL: ${streamUrl?.substring(0, 80)}`,
+                            `\n  Hint: If body > 5MB, try reducing chat history length or removing images.`);
+                    }
                     return { success: false, content: `[Custom Error ${res.status}] ${errText}`, _status: res.status };
+                }
+
+                // Copilot stream guard: check ReadableStream availability (migrated from _temp_repo)
+                const _hasReadableStreamBody = !!(res?.body && typeof res.body.getReader === 'function');
+                if (!_hasReadableStreamBody) {
+                    const _isCopilotStreamUrl = !!(streamUrl && streamUrl.includes('githubcopilot.com'));
+                    if (_isCopilotStreamUrl) {
+                        console.error('[CPM] Copilot streaming response body unavailable (no ReadableStream).');
+                        return { success: false, content: '[CPM] Copilot 스트리밍 응답 본문을 읽을 수 없습니다. ReadableStream이 지원되지 않는 환경입니다.', _status: 0 };
+                    }
+                    // Non-streaming fallback for non-Copilot (migrated from _temp_repo)
+                    console.warn(`[CPM] Streaming response body unavailable for ${format}; retrying as non-streaming.`);
+                    const _toNonStreamingUrl = (urlValue) => {
+                        let nextUrl = String(urlValue || streamUrl || '');
+                        if (format === 'google') {
+                            nextUrl = nextUrl.replace(':streamGenerateContent', ':generateContent');
+                            nextUrl = nextUrl.replace(/([?&])alt=sse(&)?/i, (_m, sep, tail) => (tail ? sep : ''));
+                            nextUrl = nextUrl.replace(/\\?&/, '?').replace(/[?&]$/, '');
+                        }
+                        return nextUrl;
+                    };
+                    const fallbackUrl = _toNonStreamingUrl(streamUrl);
+                    const fallbackBodyObj = { ...body };
+                    delete fallbackBodyObj.stream_options;
+                    if (format !== 'google') fallbackBodyObj.stream = false;
+                    const fallbackBody = sanitizeBodyJSON(safeStringify(fallbackBodyObj));
+                    const fallbackRes = await _executeWithRetry(
+                        () => _smartFetchFn(fallbackUrl, { method: 'POST', headers: reqHeaders, body: fallbackBody, signal: args._abortSignal }),
+                        `${format} non-stream fallback`, 3, args._abortSignal
+                    );
+                    if (!fallbackRes.ok) {
+                        const errBody = await fallbackRes.text();
+                        return { success: false, content: `[Custom Error ${fallbackRes.status}] ${errBody}`, _status: fallbackRes.status };
+                    }
+                    const fallbackText = await fallbackRes.text();
+                    let fallbackData;
+                    try { fallbackData = JSON.parse(fallbackText); } catch {
+                        return { success: false, content: `[Custom API Error] Response is not JSON: ${fallbackText.substring(0, 1000)}`, _status: fallbackRes.status };
+                    }
+                    if (format === 'anthropic') return parseClaudeNonStreamingResponse(fallbackData, { showThinking: thought });
+                    if (format === 'google') return parseGeminiNonStreamingResponse(fallbackData, { showThoughtsToken: thought, useThoughtSignature: thought });
+                    if (useResponsesAPI) return parseResponsesAPINonStreamingResponse(fallbackData, { showThinking: thought, _requestId: args._requestId });
+                    return parseOpenAINonStreamingResponse(fallbackData, { showThinking: thought, _requestId: args._requestId });
                 }
 
                 _logEntry.response = '(streaming…)';
@@ -1178,7 +1550,7 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                     // C-4: name 필드 제거
                     if (nonStreamBody.messages) {
                         nonStreamBody.input = Array.isArray(nonStreamBody.messages)
-                            ? nonStreamBody.messages.filter(m => m != null && typeof m === 'object').map(({ name, ...rest }) => rest)
+                            ? nonStreamBody.messages.filter(m => m != null && typeof m === 'object').map(({ name: _name, ...rest }) => rest)
                             : [];
                         delete nonStreamBody.messages;
                     }
@@ -1187,11 +1559,25 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                         nonStreamBody.reasoning = { effort: nonStreamBody.reasoning_effort, summary: 'auto' };
                         delete nonStreamBody.reasoning_effort;
                     }
+                    // GAP-FIX: Responses API max_completion_tokens/max_tokens → max_output_tokens (migrated from _temp_repo)
+                    if (nonStreamBody.max_completion_tokens) { nonStreamBody.max_output_tokens = nonStreamBody.max_completion_tokens; delete nonStreamBody.max_completion_tokens; }
+                    else if (nonStreamBody.max_tokens) { nonStreamBody.max_output_tokens = nonStreamBody.max_tokens; delete nonStreamBody.max_tokens; }
+                    // GAP-FIX: Strip sampling params for Responses API (migrated from _temp_repo)
+                    if (args.temperature === undefined || args.temperature === null) delete nonStreamBody.temperature;
+                    if (args.top_p === undefined || args.top_p === null) delete nonStreamBody.top_p;
+                    if (args.frequency_penalty === undefined || args.frequency_penalty === null) delete nonStreamBody.frequency_penalty;
+                    if (args.presence_penalty === undefined || args.presence_penalty === null) delete nonStreamBody.presence_penalty;
+                    delete nonStreamBody.min_p; delete nonStreamBody.repetition_penalty;
                     // Responses API: stream_options / prompt_cache_retention 미지원
                     delete nonStreamBody.stream_options;
                     delete nonStreamBody.prompt_cache_retention;
                 }
                 const finalBody = sanitizeBodyJSON(safeStringify(nonStreamBody));
+                // GAP-FIX: body size warning for non-streaming (migrated from _temp_repo)
+                const _nonStreamBodyLen = finalBody.length;
+                if (_nonStreamBodyLen > 5_000_000) {
+                    console.warn(`[CPM] \u26a0\ufe0f Non-streaming body size: ${(_nonStreamBodyLen / 1_048_576).toFixed(2)} MB. Large bodies may cause 'unexpected EOF'.`);
+                }
                 let fetchUrl = url;
                 if (useResponsesAPI) {
                     fetchUrl = url.replace(/\/chat\/completions$/i, '/responses');
@@ -1200,9 +1586,10 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                     const sep = fetchUrl.includes('?') ? '&' : '?';
                     fetchUrl += `${sep}key=${encodeURIComponent(currentKey)}`;
                 }
-                const res = await smartFetch(fetchUrl, {
-                    method: 'POST', headers: reqHeaders, body: finalBody, signal: args._abortSignal
-                });
+                const res = await _executeWithRetry(
+                    () => _smartFetchFn(fetchUrl, { method: 'POST', headers: reqHeaders, body: finalBody, signal: args._abortSignal }),
+                    `${format} request`, 3, args._abortSignal
+                );
                 if (!res.ok) {
                     const errText = await res.text();
                     _logEntry.status = res.status;
@@ -1212,7 +1599,10 @@ async function handleCustomModel(modelDef, messages, temp, maxTokens, args) {
                 _logEntry.status = res.status;
                 const rawText = await res.text();
                 let data;
-                try { data = JSON.parse(rawText); } catch { data = { raw: rawText }; }
+                try { data = JSON.parse(rawText); } catch {
+                    // GAP-FIX: return proper error on JSON parse failure (migrated from _temp_repo)
+                    return { success: false, content: `[Custom API Error] Response is not JSON: ${rawText.substring(0, 1000)}`, _status: res.status };
+                }
                 _logEntry.response = rawText.substring(0, 4000);
 
                 if (format === 'anthropic') {
@@ -1261,7 +1651,9 @@ function setupControlChannel() {
         }
 
         if (msg.type === MSG.REGISTER_PROVIDER) {
-            const { pluginName, name, models, settingsFields, supportsDynamicModels } = msg;
+            const { pluginName, name, settingsFields, supportsDynamicModels } = msg;
+            /** @type {any[]} */
+            const models = /** @type {any[]} */ (msg.models) || [];
             if (!name || !pluginName) return;
             console.log(`[CPM] Provider registration: ${name} (plugin: ${pluginName}, ${models?.length || 0} models)`);
             registeredProviders.set(name, {
@@ -1426,8 +1818,35 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
     const getVal = (k) => safeGetArg(k);
     const getBoolVal = (k) => safeGetBoolArg(k);
-    const setVal = (k, v) => { setArg(k, String(v)); SettingsBackup.updateKey(k, String(v)); };
+    const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const setVal = async (k, v) => {
+        setArg(k, String(v));
+        SettingsBackup.updateKey(k, String(v));
+        if (k === 'cpm_compatibility_mode' || k === 'cpm_streaming_enabled' || k === 'cpm_copilot_nodeless_mode') {
+            _resetCompatibilityModeCache();
+        }
+        if (k === 'cpm_copilot_nodeless_mode') {
+            clearCopilotTokenCache();
+        }
+        // Apply Copilot emulation version overrides live
+        if (k === 'cpm_copilot_vscode_version' || k === 'cpm_copilot_chat_version') {
+            const chatVer = await safeGetArg('cpm_copilot_chat_version', '');
+            const codeVer = await safeGetArg('cpm_copilot_vscode_version', '');
+            setCopilotVersionOverrides({ chatVersion: chatVer, vscodeVersion: codeVer });
+            clearCopilotTokenCache();
+        }
+    };
     const escAttr = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const CPM_EXPORT_VERSION = 3;
+    const CPM_PLUGIN_STORAGE_KEY_PATTERN = /^cpm[_-]/;
+    const KNOWN_CPM_PLUGIN_STORAGE_KEYS = [
+        'cpm_settings_backup',
+        'cpm_last_version_check',
+        'cpm_last_main_version_check',
+        'cpm_pending_main_update',
+        'cpm_last_boot_status',
+        'cpm_last_main_update_flush',
+    ];
     const parseUiBool = (value) => {
         if (value === true || value === false) return value;
         if (typeof value === 'number') return value !== 0;
@@ -1435,6 +1854,146 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         const v = value.trim().toLowerCase();
         return ['true', '1', 'yes', 'on'].includes(v);
     };
+    const normalizeManagedSettingValue = (key, value) => key === 'cpm_custom_models'
+        ? serializeCustomModelsSetting(value, { includeKey: true })
+        : String(value ?? '');
+
+    async function getCpmPluginStorageKeys() {
+        const keySet = new Set(KNOWN_CPM_PLUGIN_STORAGE_KEYS);
+        try {
+            if (typeof Risu?.pluginStorage?.keys === 'function') {
+                const dynamicKeys = await Risu.pluginStorage.keys();
+                for (const key of dynamicKeys || []) {
+                    if (CPM_PLUGIN_STORAGE_KEY_PATTERN.test(String(key))) keySet.add(String(key));
+                }
+            }
+        } catch (_) { /* ignore */ }
+        return [...keySet];
+    }
+
+    async function exportPluginStorageSnapshot() {
+        const snapshot = {};
+        for (const key of await getCpmPluginStorageKeys()) {
+            try {
+                const value = await Risu.pluginStorage.getItem(key);
+                if (value !== undefined && value !== null && value !== '') snapshot[key] = String(value);
+            } catch (_) { /* ignore */ }
+        }
+        return snapshot;
+    }
+
+    async function importPluginStorageSnapshot(snapshot) {
+        const existingKeys = await getCpmPluginStorageKeys();
+        for (const key of existingKeys) {
+            if (Object.prototype.hasOwnProperty.call(snapshot, key)) continue;
+            try {
+                if (typeof Risu?.pluginStorage?.removeItem === 'function') await Risu.pluginStorage.removeItem(key);
+                else await Risu.pluginStorage.setItem(key, '');
+            } catch (_) { /* ignore */ }
+        }
+        for (const [key, value] of Object.entries(snapshot || {})) {
+            if (!CPM_PLUGIN_STORAGE_KEY_PATTERN.test(String(key))) continue;
+            try { await Risu.pluginStorage.setItem(key, String(value ?? '')); } catch (_) { /* ignore */ }
+        }
+    }
+
+    function normalizeImportEnvelope(importedData) {
+        if (!importedData || typeof importedData !== 'object' || Array.isArray(importedData)) {
+            throw new Error('설정 파일 형식이 올바르지 않습니다.');
+        }
+        if ('settings' in importedData || 'pluginStorage' in importedData || '_cpmExportVersion' in importedData) {
+            return {
+                exportVersion: Number(importedData._cpmExportVersion || 0) || 0,
+                metadata: importedData.metadata && typeof importedData.metadata === 'object' ? importedData.metadata : null,
+                settings: importedData.settings && typeof importedData.settings === 'object' ? importedData.settings : {},
+                pluginStorage: importedData.pluginStorage && typeof importedData.pluginStorage === 'object' ? importedData.pluginStorage : {},
+            };
+        }
+        return { exportVersion: 0, metadata: null, settings: importedData, pluginStorage: {} };
+    }
+
+    async function refreshRuntimeStatusPanels() {
+        const statusEl = document.getElementById('cpm-stream-status');
+        const compatStatusEl = document.getElementById('cpm-compat-status');
+        if (!statusEl && !compatStatusEl) return;
+
+        try {
+            const capable = await checkStreamCapability();
+            if (statusEl) {
+                statusEl.innerHTML = capable
+                    ? '<span class="text-emerald-400">✓ Bridge 지원됨</span> — ReadableStream 전송 가능.'
+                    : '<span class="text-yellow-400">✗ Bridge 미지원</span> — 자동으로 문자열 수집 모드로 폴백됩니다.';
+                statusEl.className = `mt-4 rounded-lg border p-3 text-xs ${capable ? 'border-emerald-700 bg-emerald-950/30 text-emerald-100' : 'border-yellow-800 bg-yellow-950/30 text-yellow-100'}`;
+            }
+
+            if (compatStatusEl) {
+                const manualEnabled = await safeGetBoolArg('cpm_compatibility_mode', false);
+                const nodelessMode = await safeGetArg('cpm_copilot_nodeless_mode', 'off');
+                if (manualEnabled) {
+                    compatStatusEl.innerHTML = `<span class="text-amber-400">⚡ 수동 활성화됨</span> — nativeFetch 건너뛰기 + 스트리밍 자동 비활성화.${nodelessMode !== 'off' ? ` <span class="text-cyan-300">Node-less 실험 모드: ${escHtml(nodelessMode)}</span>` : ''}`;
+                    compatStatusEl.className = 'mt-3 rounded-lg border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-100';
+                } else if (!capable) {
+                    compatStatusEl.innerHTML = `<span class="text-yellow-400">⚠ Bridge 미지원</span> — ReadableStream 전달이 불가능한 환경입니다. 문제가 있으면 호환성 모드를 수동으로 켜주세요.${nodelessMode !== 'off' ? ` <span class="text-cyan-300">Node-less 실험 모드: ${escHtml(nodelessMode)}</span>` : ''}`;
+                    compatStatusEl.className = 'mt-3 rounded-lg border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-100';
+                } else {
+                    compatStatusEl.innerHTML = nodelessMode === 'off'
+                        ? '<span class="text-emerald-400">✓ 비활성</span> — Bridge 정상. 호환성 모드가 필요하지 않습니다.'
+                        : `<span class="text-cyan-300">🧪 Node-less 실험 모드</span> — iPhone용 호환성은 꺼져 있지만 Copilot 헤더 전략은 ${escHtml(nodelessMode)} 로 동작합니다.`;
+                    compatStatusEl.className = 'mt-3 rounded-lg border border-emerald-700 bg-emerald-950/30 p-3 text-xs text-emerald-100';
+                }
+            }
+        } catch (e) {
+            const msg = escHtml(e?.message || e);
+            if (statusEl) {
+                statusEl.innerHTML = `<span class="text-red-400">Bridge 확인 실패:</span> ${msg}`;
+                statusEl.className = 'mt-4 rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs text-red-100';
+            }
+            if (compatStatusEl) {
+                compatStatusEl.innerHTML = `<span class="text-red-400">확인 실패:</span> ${msg}`;
+                compatStatusEl.className = 'mt-3 rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs text-red-100';
+            }
+        }
+    }
+
+    async function purgeAllCpmData() {
+        let pluginStorageCleared = 0;
+        let argsCleared = 0;
+
+        for (const key of await getCpmPluginStorageKeys()) {
+            try {
+                if (typeof Risu?.pluginStorage?.removeItem === 'function') await Risu.pluginStorage.removeItem(key);
+                else await Risu.pluginStorage.setItem(key, '');
+                pluginStorageCleared++;
+            } catch (_) { /* ignore */ }
+        }
+
+        const managedKeys = SettingsBackup.getAllKeys();
+        for (const key of managedKeys) {
+            try {
+                setArg(key, '');
+                argsCleared++;
+            } catch (_) { /* ignore */ }
+        }
+
+        const legacyFields = ['url', 'model', 'key', 'name', 'format', 'sysfirst', 'altrole', 'mustuser', 'maxout', 'mergesys', 'decoupled', 'thought', 'reasoning', 'verbosity', 'thinking', 'tok'];
+        for (let i = 1; i <= 10; i++) {
+            for (const field of legacyFields) {
+                try {
+                    setArg(`cpm_c${i}_${field}`, '');
+                    argsCleared++;
+                } catch (_) { /* ignore */ }
+            }
+        }
+
+        CUSTOM_MODELS_CACHE.splice(0, CUSTOM_MODELS_CACHE.length);
+        for (let i = ALL_DEFINED_MODELS.length - 1; i >= 0; i--) {
+            if (ALL_DEFINED_MODELS[i]?.provider === 'Custom') ALL_DEFINED_MODELS.splice(i, 1);
+        }
+        clearApiRequests();
+        try { await SettingsBackup.load(); SettingsBackup._cache = {}; await SettingsBackup.save(); } catch (_) { /* ignore */ }
+
+        return { pluginStorageCleared, argsCleared };
+    }
 
     const renderInput = async (id, label, type = 'text', opts = []) => {
         let html = '<div class="mb-4">';
@@ -1568,6 +2127,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
                 <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mt-5 mb-2">Features</div>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-copilot">🔑 Copilot Token</button>
+                <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-operations">🧹 운영/복구</button>
 
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-diagnostics">🔍 진단 (Diagnostics)</button>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-apilog">📡 API 요청 로그</button>
@@ -1624,6 +2184,40 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     ${await renderInput('cpm_streaming_enabled', '스트리밍 패스스루 활성화 (Enable Streaming Pass-Through)', 'checkbox')}
                     ${await renderInput('cpm_streaming_show_thinking', 'Anthropic Thinking 토큰 표시 (Show Thinking in Stream)', 'checkbox')}
                     ${await renderInput('cpm_streaming_show_token_usage', '스트림 토큰 사용량 포함 (Include Token Usage in Stream)', 'checkbox')}
+                </div>
+                <div class="mt-6 pt-4 border-t border-gray-700/50">
+                    <h5 class="text-sm font-bold text-amber-400 mb-3">📱 iPhone/Safari 호환성 모드 (Compatibility Mode)</h5>
+                    <div class="bg-gray-800/70 border border-amber-900/50 rounded-lg p-4 mb-4">
+                        <p class="text-xs text-amber-300 mb-2 font-semibold">🔧 호환성 모드란?</p>
+                        <p class="text-xs text-gray-400 mb-2">ReadableStream 전달이 불안정한 환경에서 일반 프로바이더의 nativeFetch 스트리밍 경로를 건너뛰고 안전한 폴백 경로를 사용합니다.</p>
+                        <p class="text-xs text-gray-400 mb-2">Copilot은 인증 제약 때문에 예외적으로 기존 nativeFetch 경로를 유지합니다.</p>
+                        <p class="text-xs text-yellow-500">⚠️ 일반 프로바이더 스트리밍은 자동으로 꺼지고, Copilot만 예외적으로 유지됩니다.</p>
+                    </div>
+                    <div class="space-y-3">
+                        ${await renderInput('cpm_compatibility_mode', '호환성 모드 활성화 (Compatibility Mode)', 'checkbox')}
+                        ${await renderInput('cpm_copilot_nodeless_mode', 'Node-less용 Copilot 실험 모드', 'select', [
+                            { value: 'off', text: '끄기 (기본 헤더 유지)' },
+                            { value: 'nodeless-1', text: '실험 1 — 토큰 교환 헤더만 축소' },
+                            { value: 'nodeless-2', text: '실험 2 — 토큰 + 실제 요청 헤더 축소' },
+                        ])}
+                    </div>
+
+                    <!-- Copilot Emulation Version Overrides -->
+                    <details class="mt-4 group">
+                        <summary class="cursor-pointer text-sm font-semibold text-amber-400 hover:text-amber-300 transition-colors select-none">
+                            ⚙️ Copilot 에뮤레이션 버전 오버라이드 (고급)
+                        </summary>
+                        <div class="mt-3 bg-gray-900/60 border border-amber-900/40 rounded-lg p-4 space-y-3">
+                            <p class="text-xs text-gray-400 mb-2">비워두면 기본 내장값을 사용합니다. Copilot API에서 <code class="text-amber-300">model_not_supported</code> 오류가 날 때 최신 버전으로 직접 업데이트할 수 있습니다.</p>
+                            ${await renderInput('cpm_copilot_vscode_version', 'VSCode 에뮤레이션 버전', 'text')}
+                            <p class="text-xs text-gray-500 -mt-1">기본값: <code class="text-gray-400">${escHtml(VSCODE_VERSION)}</code></p>
+                            ${await renderInput('cpm_copilot_chat_version', 'Copilot Chat 확장 버전', 'text')}
+                            <p class="text-xs text-gray-500 -mt-1">기본값: <code class="text-gray-400">${escHtml(COPILOT_CHAT_VERSION)}</code></p>
+                            <p class="text-xs text-amber-400/80 mt-2">⚠️ 변경 후 Copilot 토큰 캐시가 자동으로 초기화됩니다.</p>
+                        </div>
+                    </details>
+                    <div id="cpm-stream-status" class="mt-4 rounded-lg border border-gray-700 bg-gray-900/70 p-3 text-xs text-gray-300">브리지 상태 확인 중...</div>
+                    <div id="cpm-compat-status" class="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 text-xs text-gray-300">호환성 상태 확인 중...</div>
                 </div>
             </div>
         </div>
@@ -1694,10 +2288,60 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             <div id="cpm-copilot-result" class="hidden"></div>
         </div>
 
+        <div id="tab-operations" class="cpm-tab-content hidden">
+            <h3 class="text-3xl font-bold text-orange-400 mb-6 pb-3 border-b border-gray-700">🧹 운영/복구 (Operations)</h3>
+            <p class="text-orange-300 font-semibold mb-6 border-l-4 border-orange-500 pl-4 py-1">
+                IPC 환경에서 안전하게 수행할 수 있는 유지보수 도구만 제공합니다. eval 기반 서브플러그인 런타임은 제외하고, 설정 백업·상태 점검·운영 데이터 정리에 집중합니다.
+            </p>
+
+            <div class="space-y-5">
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-blue-400 mb-3">📦 현재 저장 상태</h4>
+                    <div id="cpm-ops-summary" class="bg-gray-900 rounded p-4 font-mono text-xs text-gray-300 space-y-1">
+                        <div>로딩 중...</div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800/80 border border-cyan-800/60 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-cyan-400 mb-2">🧭 권장 작업 순서</h4>
+                    <ol class="text-xs text-gray-300 list-decimal list-inside space-y-1">
+                        <li>먼저 설정 내보내기로 현재 상태를 백업합니다.</li>
+                        <li>진단 탭에서 JSON/TXT 리포트를 저장해 문제 재현 정보를 확보합니다.</li>
+                        <li>그다음에도 필요할 때만 전체 정리 버튼으로 CPM 저장 데이터를 초기화합니다.</li>
+                    </ol>
+                    <p class="text-[11px] text-gray-500 mt-3">팁: 전체 정리는 IPC 프로바이더 번들 자체를 제거하지 않으며, CPM이 저장한 운영 데이터만 비웁니다.</p>
+                </div>
+
+                <div class="bg-red-900/20 border border-red-700/50 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-red-400 mb-2">⚠️ CPM 데이터 전체 삭제 (Danger Zone)</h4>
+                    <p class="text-xs text-gray-400 mb-1">
+                        Cupcake Provider Manager가 저장한 <strong class="text-red-300">관리 대상 설정 / pluginStorage / API 로그 / 커스텀 모델</strong>을 일괄 초기화합니다.
+                    </p>
+                    <ul class="text-xs text-gray-500 mb-3 list-disc list-inside space-y-0.5">
+                        <li>모든 CPM 관리 설정 키</li>
+                        <li>레거시 C1-C10 커스텀 모델 키</li>
+                        <li>CPM pluginStorage 데이터</li>
+                        <li>커스텀 모델 캐시 및 API 로그</li>
+                    </ul>
+                    <p class="text-xs text-yellow-400 font-semibold mb-3">
+                        💡 IPC 등록 프로바이더 번들 자체는 제거하지 않지만, CPM이 저장한 운영 데이터는 정리됩니다.
+                    </p>
+                    <div class="flex flex-wrap gap-3">
+                        <button id="cpm-ops-purge-btn" class="bg-red-700 hover:bg-red-600 text-white font-bold py-2 px-6 rounded transition-colors text-sm shadow-lg shadow-red-900/50">
+                            🗑️ CPM 저장 데이터 모두 지우기
+                        </button>
+                        <button id="cpm-ops-refresh-btn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2 px-6 rounded transition-colors text-sm">
+                            🔄 상태 새로고침
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="tab-diagnostics" class="cpm-tab-content hidden">
             <h3 class="text-3xl font-bold text-emerald-400 mb-6 pb-3 border-b border-gray-700">🔍 진단 정보 (Diagnostics)</h3>
             <p class="text-emerald-300 font-semibold mb-6 border-l-4 border-emerald-500 pl-4 py-1">
-                Cupcake PM 런타임 상태를 확인하고 버그 리포트용 진단 데이터를 내보낼 수 있습니다.
+                Cupcake PM 런타임 상태를 한 번에 점검하고, 문제 재현·이관 검증·백업 기록에 사용할 진단 메타데이터를 내보낼 수 있습니다.
             </p>
 
             <div class="space-y-5">
@@ -1705,6 +2349,34 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
                     <h4 class="text-lg font-bold text-blue-400 mb-3">📋 시스템 개요</h4>
                     <div id="cpm-diag-overview" class="bg-gray-900 rounded p-4 font-mono text-xs text-gray-300 space-y-1">
+                        <div>로딩 중...</div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-amber-400 mb-3">🌉 브리지 / 호환성</h4>
+                    <div id="cpm-diag-bridge" class="bg-gray-900 rounded p-4 font-mono text-xs text-gray-300 space-y-1">
+                        <div>로딩 중...</div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-rose-400 mb-3">💾 저장소 / 백업</h4>
+                    <div id="cpm-diag-storage" class="bg-gray-900 rounded p-4 font-mono text-xs text-gray-300 space-y-1">
+                        <div>로딩 중...</div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-orange-400 mb-3">🩺 마지막 부트 상태</h4>
+                    <div id="cpm-diag-boot" class="bg-gray-900 rounded p-4 font-mono text-xs text-gray-300 space-y-1">
+                        <div>로딩 중...</div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <h4 class="text-lg font-bold text-sky-400 mb-3">🎯 슬롯 매핑</h4>
+                    <div id="cpm-diag-slots" class="bg-gray-900 rounded p-4 text-xs text-gray-300 space-y-2">
                         <div>로딩 중...</div>
                     </div>
                 </div>
@@ -1736,13 +2408,13 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <!-- Action buttons -->
                 <div class="flex flex-wrap gap-3">
                     <button id="cpm-diag-generate" class="bg-emerald-700 hover:bg-emerald-600 text-white font-semibold py-3 px-6 rounded transition-colors text-sm shadow touch-manipulation">
-                        📋 버그 리포트 생성 (JSON)
+                        📋 진단 JSON 내보내기
                     </button>
                     <button id="cpm-diag-generate-text" class="bg-teal-700 hover:bg-teal-600 text-white font-semibold py-3 px-6 rounded transition-colors text-sm shadow touch-manipulation">
-                        📝 버그 리포트 생성 (Text)
+                        📝 요약 텍스트 내보내기
                     </button>
                     <button id="cpm-diag-copy-clipboard" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded transition-colors text-sm shadow touch-manipulation">
-                        📎 클립보드 복사
+                        📎 JSON 클립보드 복사
                     </button>
                 </div>
             </div>
@@ -1806,6 +2478,14 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                         <textarea id="cpm-cm-key" rows="2" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-blue-500" spellcheck="false" placeholder="sk-xxxx 또는 여러 키를 공백/줄바꿈으로 구분"></textarea>
                         <p class="text-xs text-gray-500 mt-1">🔄 키를 2개 이상 입력하면 자동으로 키회전이 활성화됩니다.</p>
                     </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-400 mb-1">CORS Proxy URL <span class="text-xs text-yellow-400">(선택사항 — 노드리스/CORS 우회용)</span></label>
+                        <input type="text" id="cpm-cm-proxy-url" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm" placeholder="https://my-proxy.workers.dev">
+                        <label class="mt-2 flex items-center space-x-2 text-xs text-gray-400 cursor-pointer">
+                            <input type="checkbox" id="cpm-cm-proxy-direct" class="form-checkbox bg-gray-800">
+                            <span>Direct 모드 <span class="text-yellow-400">(프록시 URL로 직접 요청, 원본 URL은 X-Target-URL 헤더로 전달)</span></span>
+                        </label>
+                    </div>
                     <div class="md:col-span-2 mt-4 border-t border-gray-800 pt-4">
                         <h5 class="text-sm font-bold text-gray-300 mb-3">Model Parameters (모델 매개변수)</h5>
                     </div>
@@ -1848,6 +2528,10 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                         <p class="text-xs text-gray-500 mt-1">Anthropic: budget_tokens. Gemini 2.5: thinkingBudget.</p>
                     </div>
                     <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Max Output Tokens (0=제한없음)</label>
+                        <input type="number" id="cpm-cm-max-output" min="0" step="1024" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white" placeholder="0">
+                    </div>
+                    <div>
                         <label class="block text-sm font-medium text-gray-400 mb-1">Prompt Cache Retention (OpenAI)</label>
                         <select id="cpm-cm-prompt-cache-retention" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white">
                             <option value="none">None (서버 기본값)</option>
@@ -1885,6 +2569,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                             <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-streaming" class="form-checkbox bg-gray-800"> <span>Use Streaming</span></label>
                             <p class="text-xs text-amber-300 ml-6">※ 글로벌 탭의 "스트리밍 패스스루 활성화"도 함께 켜야 합니다.</p>
                             <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-thought" class="form-checkbox bg-gray-800"> <span>useThoughtSignature</span></label>
+                            <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-adaptive-thinking" class="form-checkbox bg-gray-800"> <span>useAdaptiveThinking (적응형 사고)</span></label>
                         </div>
                     </div>
                     <div class="md:col-span-2 mt-4 border-t border-gray-800 pt-4">
@@ -1916,7 +2601,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             document.getElementById('tab-customs').appendChild(cmEditor);
             cmEditor.classList.add('hidden');
         }
-        cmCount.innerText = CUSTOM_MODELS_CACHE.length;
+        cmCount.innerText = String(CUSTOM_MODELS_CACHE.length);
         if (CUSTOM_MODELS_CACHE.length === 0) {
             cmList.innerHTML = '<div class="text-center text-gray-500 py-4 border border-dashed border-gray-700 rounded">No custom models defined.</div>';
             return;
@@ -1938,10 +2623,10 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         // Bind custom model list buttons
         cmList.querySelectorAll('.cpm-cm-export-btn').forEach(btn => btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            const m = CUSTOM_MODELS_CACHE[parseInt(e.currentTarget.dataset.idx)];
+            const ct = /** @type {HTMLElement} */ (e.currentTarget);
+            const m = CUSTOM_MODELS_CACHE[parseInt(ct.dataset.idx, 10)];
             if (!m) return;
-            const exp = { ...m, _cpmModelExport: true };
-            delete exp.key;
+            const exp = serializeCustomModelExport(m);
             const url = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(exp, null, 2));
             const a = document.createElement('a');
             a.href = url;
@@ -1951,7 +2636,8 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
         cmList.querySelectorAll('.cpm-cm-del-btn').forEach(btn => btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            const idx = parseInt(e.currentTarget.dataset.idx);
+            const ct = /** @type {HTMLElement} */ (e.currentTarget);
+            const idx = parseInt(ct.dataset.idx);
             if (confirm('Delete this model?')) {
                 CUSTOM_MODELS_CACHE.splice(idx, 1);
                 persistCustomModels();
@@ -1961,9 +2647,10 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
         cmList.querySelectorAll('.cpm-cm-edit-btn').forEach(btn => btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            const idx = parseInt(e.currentTarget.dataset.idx);
+            const ct = /** @type {HTMLElement} */ (e.currentTarget);
+            const idx = parseInt(ct.dataset.idx);
             openEditor(CUSTOM_MODELS_CACHE[idx]);
-            const itemDiv = e.currentTarget.closest('.group');
+            const itemDiv = ct.closest('.group');
             if (itemDiv) itemDiv.after(cmEditor);
             cmEditor.classList.remove('hidden');
         }));
@@ -1980,28 +2667,34 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
     const openEditor = (existing) => {
         const m = existing || {};
-        document.getElementById('cpm-cm-id').value = m.uniqueId || ('custom_' + Date.now());
-        document.getElementById('cpm-cm-name').value = m.name || '';
-        document.getElementById('cpm-cm-model').value = m.model || '';
-        document.getElementById('cpm-cm-url').value = m.url || '';
-        document.getElementById('cpm-cm-key').value = m.key || '';
-        document.getElementById('cpm-cm-format').value = m.format || 'openai';
-        document.getElementById('cpm-cm-tok').value = m.tok || 'o200k_base';
-        document.getElementById('cpm-cm-responses-mode').value = m.responsesMode || 'auto';
-        document.getElementById('cpm-cm-thinking').value = m.thinking || 'off';
-        document.getElementById('cpm-cm-thinking-budget').value = m.thinkingBudget || 0;
-        document.getElementById('cpm-cm-prompt-cache-retention').value = m.promptCacheRetention || 'none';
-        document.getElementById('cpm-cm-reasoning').value = m.reasoning || 'none';
-        document.getElementById('cpm-cm-verbosity').value = m.verbosity || 'none';
-        document.getElementById('cpm-cm-effort').value = m.effort || 'none';
-        document.getElementById('cpm-cm-sysfirst').checked = parseEditorBool(m.sysfirst);
-        document.getElementById('cpm-cm-mergesys').checked = parseEditorBool(m.mergesys);
-        document.getElementById('cpm-cm-altrole').checked = parseEditorBool(m.altrole);
-        document.getElementById('cpm-cm-mustuser').checked = parseEditorBool(m.mustuser);
-        document.getElementById('cpm-cm-maxout').checked = parseEditorBool(m.maxout);
-        document.getElementById('cpm-cm-streaming').checked = parseEditorBool(m.streaming);
-        document.getElementById('cpm-cm-thought').checked = parseEditorBool(m.thought);
-        document.getElementById('cpm-cm-custom-params').value = m.customParams || '';
+        /** @returns {HTMLInputElement} */
+        const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
+        el('cpm-cm-id').value = m.uniqueId || ('custom_' + Date.now());
+        el('cpm-cm-name').value = m.name || '';
+        el('cpm-cm-model').value = m.model || '';
+        el('cpm-cm-url').value = m.url || '';
+        el('cpm-cm-key').value = m.key || '';
+        el('cpm-cm-proxy-url').value = m.proxyUrl || '';
+        el('cpm-cm-proxy-direct').checked = parseEditorBool(m.proxyDirect);
+        el('cpm-cm-format').value = m.format || 'openai';
+        el('cpm-cm-tok').value = m.tok || 'o200k_base';
+        el('cpm-cm-responses-mode').value = m.responsesMode || 'auto';
+        el('cpm-cm-thinking').value = m.thinking || 'off';
+        el('cpm-cm-thinking-budget').value = m.thinkingBudget || 0;
+        el('cpm-cm-max-output').value = m.maxOutputLimit || 0;
+        el('cpm-cm-prompt-cache-retention').value = m.promptCacheRetention || 'none';
+        el('cpm-cm-reasoning').value = m.reasoning || 'none';
+        el('cpm-cm-verbosity').value = m.verbosity || 'none';
+        el('cpm-cm-effort').value = m.effort || 'none';
+        el('cpm-cm-sysfirst').checked = parseEditorBool(m.sysfirst);
+        el('cpm-cm-mergesys').checked = parseEditorBool(m.mergesys);
+        el('cpm-cm-altrole').checked = parseEditorBool(m.altrole);
+        el('cpm-cm-mustuser').checked = parseEditorBool(m.mustuser);
+        el('cpm-cm-maxout').checked = parseEditorBool(m.maxout);
+        el('cpm-cm-streaming').checked = parseEditorBool(m.streaming);
+        el('cpm-cm-thought').checked = parseEditorBool(m.thought);
+        el('cpm-cm-adaptive-thinking').checked = parseEditorBool(m.adaptiveThinking);
+        el('cpm-cm-custom-params').value = m.customParams || '';
         document.getElementById('cpm-cm-editor-title').innerText = existing ? 'Edit Custom Model' : 'Add New Model';
     };
 
@@ -2026,34 +2719,43 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
     // ─── AUTOSAVE ───
     content.querySelectorAll('input[type="text"], input[type="password"], input[type="number"], select, textarea').forEach(el => {
-        el.addEventListener('change', (e) => setVal(e.target.id, e.target.value));
+        el.addEventListener('change', (e) => { const t = /** @type {HTMLInputElement} */ (e.target); setVal(t.id, t.value); });
     });
     content.querySelectorAll('input[type="checkbox"]').forEach(el => {
-        el.addEventListener('change', (e) => setVal(e.target.id, e.target.checked));
+        el.addEventListener('change', (e) => {
+            const t = /** @type {HTMLInputElement} */ (e.target);
+            setVal(t.id, t.checked);
+            if (t.id === 'cpm_streaming_enabled' || t.id === 'cpm_compatibility_mode') {
+                refreshRuntimeStatusPanels();
+            }
+        });
     });
+    const _nodelessModeSelect = document.getElementById('cpm_copilot_nodeless_mode');
+    if (_nodelessModeSelect) _nodelessModeSelect.addEventListener('change', () => refreshRuntimeStatusPanels());
 
     // Password toggles
     content.querySelectorAll('.cpm-pw-toggle').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const input = document.getElementById(btn.dataset.targetId);
+        const hBtn = /** @type {HTMLElement} */ (btn);
+        hBtn.addEventListener('click', () => {
+            const input = /** @type {HTMLInputElement} */ (document.getElementById(hBtn.dataset.targetId));
             if (!input) return;
             if (input.type === 'password') {
                 input.type = 'text';
-                btn.textContent = '🔒';
+                hBtn.textContent = '🔒';
             } else {
                 input.type = 'password';
-                btn.textContent = '👁️';
+                hBtn.textContent = '👁️';
             }
         });
     });
 
     // ─── TAB SWITCHING ───
     const tabs = sidebar.querySelectorAll('.tab-btn');
-    tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(t => { const ht = /** @type {HTMLElement} */ (t); ht.addEventListener('click', () => {
         tabs.forEach(x => { x.classList.remove('bg-gray-800', 'border-l-4', 'border-blue-500', 'text-blue-400'); });
-        t.classList.add('bg-gray-800', 'border-l-4', 'border-blue-500', 'text-blue-400');
+        ht.classList.add('bg-gray-800', 'border-l-4', 'border-blue-500', 'text-blue-400');
         content.querySelectorAll('.cpm-tab-content').forEach(p => p.classList.add('hidden'));
-        const target = document.getElementById(t.dataset.target);
+        const target = document.getElementById(ht.dataset.target);
         if (target) target.classList.remove('hidden');
         // Auto collapse on mobile
         if (window.innerWidth < 768 && mobileDropdown && !mobileDropdown.classList.contains('hidden')) {
@@ -2061,16 +2763,17 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             mobileDropdown.classList.remove('flex');
             mobileIcon.innerText = '▼';
         }
-    }));
-    const initialTab = Array.from(tabs).find((tab) => tab.dataset.target === initialTarget) || tabs[0];
+    }); });
+    const initialTab = /** @type {HTMLElement} */ (Array.from(tabs).find((tab) => /** @type {HTMLElement} */ (tab).dataset.target === initialTarget) || tabs[0]);
     if (initialTab) initialTab.click();
 
     content.querySelectorAll('.cpm-refresh-models-btn').forEach((btn) => btn.addEventListener('click', async (e) => {
-        const providerName = e.currentTarget.dataset.provider;
+        const ct = /** @type {HTMLButtonElement} */ (e.currentTarget);
+        const providerName = ct.dataset.provider;
         if (!providerName) return;
-        const originalText = e.currentTarget.textContent;
-        e.currentTarget.disabled = true;
-        e.currentTarget.textContent = '⏳ 조회 중...';
+        const originalText = ct.textContent;
+        ct.disabled = true;
+        ct.textContent = '⏳ 조회 중...';
         try {
             const result = await refreshProviderDynamicModels(providerName);
             if (!result?.success) {
@@ -2082,9 +2785,9 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         } catch (err) {
             alert(`${providerName} 동적 모델 조회 오류: ${err.message}`);
         } finally {
-            if (document.body.contains(e.currentTarget)) {
-                e.currentTarget.disabled = false;
-                e.currentTarget.textContent = originalText;
+            if (document.body.contains(ct)) {
+                ct.disabled = false;
+                ct.textContent = originalText;
             }
         }
     }));
@@ -2104,32 +2807,38 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     });
 
     document.getElementById('cpm-cm-save').addEventListener('click', () => {
-        const uid = document.getElementById('cpm-cm-id').value;
-        const newModel = {
+        /** @returns {HTMLInputElement} */
+        const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
+        const uid = el('cpm-cm-id').value;
+        const newModel = normalizeCustomModel({
             uniqueId: uid,
-            name: document.getElementById('cpm-cm-name').value,
-            model: document.getElementById('cpm-cm-model').value,
-            url: document.getElementById('cpm-cm-url').value,
-            key: document.getElementById('cpm-cm-key').value,
-            format: document.getElementById('cpm-cm-format').value,
-            tok: document.getElementById('cpm-cm-tok').value,
-            responsesMode: document.getElementById('cpm-cm-responses-mode').value || 'auto',
-            thinking: document.getElementById('cpm-cm-thinking').value,
-            thinkingBudget: parseInt(document.getElementById('cpm-cm-thinking-budget').value) || 0,
-            promptCacheRetention: document.getElementById('cpm-cm-prompt-cache-retention').value || 'none',
-            reasoning: document.getElementById('cpm-cm-reasoning').value,
-            verbosity: document.getElementById('cpm-cm-verbosity').value,
-            effort: document.getElementById('cpm-cm-effort').value,
-            sysfirst: document.getElementById('cpm-cm-sysfirst').checked,
-            mergesys: document.getElementById('cpm-cm-mergesys').checked,
-            altrole: document.getElementById('cpm-cm-altrole').checked,
-            mustuser: document.getElementById('cpm-cm-mustuser').checked,
-            maxout: document.getElementById('cpm-cm-maxout').checked,
-            streaming: document.getElementById('cpm-cm-streaming').checked,
-            decoupled: !document.getElementById('cpm-cm-streaming').checked,
-            thought: document.getElementById('cpm-cm-thought').checked,
-            customParams: document.getElementById('cpm-cm-custom-params').value,
-        };
+            name: el('cpm-cm-name').value,
+            model: el('cpm-cm-model').value,
+            url: el('cpm-cm-url').value,
+            key: el('cpm-cm-key').value,
+            proxyUrl: el('cpm-cm-proxy-url').value,
+            proxyDirect: el('cpm-cm-proxy-direct').checked,
+            format: el('cpm-cm-format').value,
+            tok: el('cpm-cm-tok').value,
+            responsesMode: el('cpm-cm-responses-mode').value || 'auto',
+            thinking: el('cpm-cm-thinking').value,
+            thinkingBudget: parseInt(el('cpm-cm-thinking-budget').value, 10) || 0,
+            maxOutputLimit: parseInt(el('cpm-cm-max-output').value, 10) || 0,
+            promptCacheRetention: el('cpm-cm-prompt-cache-retention').value || 'none',
+            reasoning: el('cpm-cm-reasoning').value,
+            verbosity: el('cpm-cm-verbosity').value,
+            effort: el('cpm-cm-effort').value,
+            sysfirst: el('cpm-cm-sysfirst').checked,
+            mergesys: el('cpm-cm-mergesys').checked,
+            altrole: el('cpm-cm-altrole').checked,
+            mustuser: el('cpm-cm-mustuser').checked,
+            maxout: el('cpm-cm-maxout').checked,
+            streaming: el('cpm-cm-streaming').checked,
+            decoupled: !el('cpm-cm-streaming').checked,
+            thought: el('cpm-cm-thought').checked,
+            adaptiveThinking: el('cpm-cm-adaptive-thinking').checked,
+            customParams: el('cpm-cm-custom-params').value,
+        });
         const existingIdx = CUSTOM_MODELS_CACHE.findIndex(x => x.uniqueId === uid);
         if (existingIdx >= 0) {
             CUSTOM_MODELS_CACHE[existingIdx] = { ...CUSTOM_MODELS_CACHE[existingIdx], ...newModel };
@@ -2151,7 +2860,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         input.accept = '.json';
         input.multiple = true;
         input.onchange = async (e) => {
-            const files = Array.from(e.target.files);
+            const files = Array.from(/** @type {HTMLInputElement} */ (e.target).files);
             if (files.length === 0) return;
             let imported = 0, errors = 0;
             for (const file of files) {
@@ -2159,10 +2868,9 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     const text = await file.text();
                     const data = JSON.parse(text);
                     if (!data._cpmModelExport || !data.name) { errors++; continue; }
-                    data.uniqueId = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-                    delete data._cpmModelExport;
-                    if (!data.key) data.key = '';
-                    CUSTOM_MODELS_CACHE.push(data);
+                    const normalized = normalizeCustomModel(data, { includeKey: true, includeUniqueId: false, includeTag: false });
+                    normalized.uniqueId = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+                    CUSTOM_MODELS_CACHE.push(normalized);
                     imported++;
                 } catch { errors++; }
             }
@@ -2194,7 +2902,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
     const _refreshApiLogPanel = () => {
         const c = document.getElementById('cpm-apilog-content');
-        const s = document.getElementById('cpm-apilog-selector');
+        const s = /** @type {HTMLSelectElement} */ (document.getElementById('cpm-apilog-selector'));
         const all = _getAllApiRequests();
         if (all.length === 0) {
             s.innerHTML = '';
@@ -2211,7 +2919,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     };
 
     document.getElementById('cpm-apilog-selector').addEventListener('change', (e) => {
-        document.getElementById('cpm-apilog-content').innerHTML = _renderApiLogEntry(_getApiRequestById(e.target.value));
+        document.getElementById('cpm-apilog-content').innerHTML = _renderApiLogEntry(_getApiRequestById(/** @type {HTMLSelectElement} */ (e.target).value));
     });
     document.getElementById('cpm-apilog-refresh').addEventListener('click', () => _refreshApiLogPanel());
     document.getElementById('cpm-apilog-export').addEventListener('click', () => {
@@ -2233,11 +2941,42 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     });
 
     // Auto-refresh API log when its tab is shown
-    const _apiLogTabBtn = Array.from(sidebar.querySelectorAll('.tab-btn')).find(b => b.dataset.target === 'tab-apilog');
+    const _apiLogTabBtn = Array.from(sidebar.querySelectorAll('.tab-btn')).find(b => /** @type {HTMLElement} */ (b).dataset.target === 'tab-apilog');
     if (_apiLogTabBtn) _apiLogTabBtn.addEventListener('click', () => setTimeout(_refreshApiLogPanel, 50));
 
     // ─── DIAGNOSTICS TAB ───
-    const _buildDiagnosticsData = () => {
+    const _collectRuntimeMetadata = async (kind) => {
+        const pluginStorageKeys = await getCpmPluginStorageKeys();
+        const streamBridgeCapable = await checkStreamCapability();
+        const compatibilityMode = await safeGetBoolArg('cpm_compatibility_mode', false);
+        const streamingEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+        const copilotNodelessMode = await safeGetArg('cpm_copilot_nodeless_mode', 'off');
+        let timeZone = 'unknown';
+        try { timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown'; } catch (_) { /* ignore */ }
+        return {
+            kind,
+            formatVersion: kind === 'settings-export' ? CPM_EXPORT_VERSION : 2,
+            generatedAt: new Date().toISOString(),
+            generatedBy: 'manager-ui',
+            cpmVersion: CPM_VERSION,
+            userAgent: typeof navigator !== 'undefined' ? navigator.userAgent || 'N/A' : 'N/A',
+            language: typeof navigator !== 'undefined' ? navigator.language || 'unknown' : 'N/A',
+            platform: typeof navigator !== 'undefined' ? navigator.platform || 'unknown' : 'N/A',
+            timeZone,
+            streamBridgeCapable,
+            compatibilityMode,
+            streamingEnabled,
+            copilotNodelessMode,
+            managedSettingsCount: SettingsBackup.getAllKeys().length,
+            pluginStorageKeyCount: pluginStorageKeys.length,
+            registeredProviderCount: registeredProviders.size,
+            totalModelCount: ALL_DEFINED_MODELS.length,
+            customModelCount: CUSTOM_MODELS_CACHE.length,
+            apiRequestLogSize: _getAllApiRequests().length,
+        };
+    };
+
+    const _buildDiagnosticsData = async () => {
         const provList = [];
         for (const [name, prov] of registeredProviders) {
             provList.push({
@@ -2256,10 +2995,34 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             method: r.method || 'POST',
             url: r.url || '',
         }));
+        let bootStatus = null;
+        try {
+            const rawBootStatus = await Risu.pluginStorage.getItem('cpm_last_boot_status');
+            if (rawBootStatus) bootStatus = JSON.parse(String(rawBootStatus));
+        } catch (_) { /* ignore */ }
+        let backupKeys = 0;
+        try {
+            const backup = await SettingsBackup.load();
+            backupKeys = backup && typeof backup === 'object' ? Object.keys(backup).length : 0;
+        } catch (_) { /* ignore */ }
+        const pluginStorageKeys = await getCpmPluginStorageKeys();
+        const metadata = await _collectRuntimeMetadata('diagnostics');
+        const slotAssignments = await Promise.all(CPM_SLOT_LIST.map(async (slot) => {
+            const configuredId = await safeGetArg(`cpm_slot_${slot}`, '');
+            const matched = ALL_DEFINED_MODELS.find((m) => m.uniqueId === configuredId);
+            return {
+                slot,
+                configuredId,
+                modelName: matched?.name || '',
+                provider: matched?.provider || '',
+            };
+        }));
         return {
+            diagnosticFormatVersion: metadata.formatVersion,
             cpmVersion: CPM_VERSION,
-            timestamp: new Date().toISOString(),
-            userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'N/A',
+            timestamp: metadata.generatedAt,
+            userAgent: metadata.userAgent,
+            metadata,
             registeredProviders: provList,
             totalModels: ALL_DEFINED_MODELS.length,
             customModels: CUSTOM_MODELS_CACHE.length,
@@ -2267,14 +3030,22 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             pendingRequests: pendingRequests.size,
             pendingControlRequests: pendingControlRequests.size,
             abortBridgeProbed: _abortBridgeProbeDone,
+            streamBridgeCapable: metadata.streamBridgeCapable,
+            compatibilityMode: metadata.compatibilityMode,
+            streamingEnabled: metadata.streamingEnabled,
+            copilotNodelessMode: metadata.copilotNodelessMode,
             apiRequestLogSize: _getAllApiRequests().length,
             recentApiRequests: recentLogs,
+            slotAssignments,
+            pluginStorageKeys,
+            backupKeys,
+            bootStatus,
             allModels: ALL_DEFINED_MODELS.map(m => ({ id: m.id, name: m.name, provider: m.provider })),
         };
     };
 
-    const _refreshDiagnosticsPanel = () => {
-        const diag = _buildDiagnosticsData();
+    const _refreshDiagnosticsPanel = async () => {
+        const diag = await _buildDiagnosticsData();
         // Overview
         const overviewEl = document.getElementById('cpm-diag-overview');
         if (overviewEl) {
@@ -2285,9 +3056,55 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <div><span class="text-gray-500">커스텀 모델:</span> <span class="text-white">${diag.customModels}개</span></div>
                 <div><span class="text-gray-500">대기 중 요청:</span> <span class="text-white">${diag.pendingRequests}개</span></div>
                 <div><span class="text-gray-500">API 로그:</span> <span class="text-white">${diag.apiRequestLogSize}건</span></div>
+                <div><span class="text-gray-500">진단 포맷:</span> <span class="text-white">v${diag.metadata?.formatVersion || 1} · ${escAttr(diag.metadata?.generatedBy || 'manager-ui')}</span></div>
+                <div><span class="text-gray-500">언어/시간대:</span> <span class="text-white">${escAttr(diag.metadata?.language || 'unknown')} / ${escAttr(diag.metadata?.timeZone || 'unknown')}</span></div>
                 <div><span class="text-gray-500">Abort 브릿지:</span> <span class="${diag.abortBridgeProbed ? 'text-green-400' : 'text-yellow-400'}">${diag.abortBridgeProbed ? '확인됨' : '대기 중'}</span></div>
                 <div class="text-gray-600 mt-2">생성 시각: ${diag.timestamp}</div>
             `;
+        }
+        const bridgeEl = document.getElementById('cpm-diag-bridge');
+        if (bridgeEl) {
+            bridgeEl.innerHTML = `
+                <div><span class="text-gray-500">ReadableStream 브릿지:</span> <span class="${diag.streamBridgeCapable ? 'text-green-400' : 'text-yellow-400'}">${diag.streamBridgeCapable ? '지원됨' : '미지원'}</span></div>
+                <div><span class="text-gray-500">스트리밍 설정:</span> <span class="text-white">${diag.streamingEnabled ? 'ON' : 'OFF'}</span></div>
+                <div><span class="text-gray-500">호환성 모드:</span> <span class="text-white">${diag.compatibilityMode ? 'ON' : 'OFF'}</span></div>
+                <div><span class="text-gray-500">Copilot Node-less:</span> <span class="text-white">${escAttr(diag.copilotNodelessMode)}</span></div>
+                <div><span class="text-gray-500">Abort 브릿지 확인:</span> <span class="${diag.abortBridgeProbed ? 'text-green-400' : 'text-yellow-400'}">${diag.abortBridgeProbed ? '완료' : '대기'}</span></div>
+            `;
+        }
+        const storageEl = document.getElementById('cpm-diag-storage');
+        if (storageEl) {
+            storageEl.innerHTML = `
+                <div><span class="text-gray-500">pluginStorage 키:</span> <span class="text-white">${diag.pluginStorageKeys.length}개</span></div>
+                <div><span class="text-gray-500">설정 백업 키:</span> <span class="text-white">${diag.backupKeys}개</span></div>
+                <div><span class="text-gray-500">관리 설정 키:</span> <span class="text-white">${SettingsBackup.getAllKeys().length}개</span></div>
+                <div class="text-gray-600 mt-2 break-all">${diag.pluginStorageKeys.map((k) => escAttr(k)).join(', ') || '없음'}</div>
+            `;
+        }
+        const bootEl = document.getElementById('cpm-diag-boot');
+        if (bootEl) {
+            if (!diag.bootStatus) {
+                bootEl.innerHTML = '<div class="text-gray-500">저장된 부트 상태가 없습니다.</div>';
+            } else {
+                bootEl.innerHTML = `
+                    <div><span class="text-gray-500">버전:</span> <span class="text-white">${escAttr(diag.bootStatus.version || '?')}</span></div>
+                    <div><span class="text-gray-500">설정 등록:</span> <span class="${diag.bootStatus.settingsOk ? 'text-green-400' : 'text-red-400'}">${diag.bootStatus.settingsOk ? '정상' : '실패'}</span></div>
+                    <div><span class="text-gray-500">모델 등록 수:</span> <span class="text-white">${diag.bootStatus.models ?? 0}</span></div>
+                    <div><span class="text-gray-500">성공 phase:</span> <span class="text-white">${Array.isArray(diag.bootStatus.ok) ? diag.bootStatus.ok.length : 0}</span></div>
+                    <div><span class="text-gray-500">실패 phase:</span> <span class="${Array.isArray(diag.bootStatus.fail) && diag.bootStatus.fail.length > 0 ? 'text-yellow-400' : 'text-green-400'}">${Array.isArray(diag.bootStatus.fail) ? diag.bootStatus.fail.length : 0}</span></div>
+                    <div class="text-gray-600 mt-2 break-words">${Array.isArray(diag.bootStatus.fail) && diag.bootStatus.fail.length > 0 ? diag.bootStatus.fail.map((f) => escAttr(String(f))).join(' | ') : '실패 기록 없음'}</div>
+                `;
+            }
+        }
+        const slotsEl = document.getElementById('cpm-diag-slots');
+        if (slotsEl) {
+            slotsEl.innerHTML = diag.slotAssignments.map((slotInfo) => `
+                <div class="bg-gray-800 rounded p-3 border border-gray-700">
+                    <div class="font-bold text-white">${escAttr(slotInfo.slot)}</div>
+                    <div class="text-gray-400 text-[11px]">${slotInfo.configuredId ? `${escAttr(slotInfo.provider || 'Unknown')} · ${escAttr(slotInfo.modelName || slotInfo.configuredId)}` : '미할당'}</div>
+                    ${slotInfo.configuredId ? `<div class="text-gray-600 text-[10px] font-mono mt-1">${escAttr(slotInfo.configuredId)}</div>` : ''}
+                </div>
+            `).join('');
         }
         // Providers
         const providersEl = document.getElementById('cpm-diag-providers');
@@ -2331,31 +3148,70 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         }
     };
 
-    // Auto-refresh diagnostics when its tab opens
-    const _diagTabBtn = Array.from(sidebar.querySelectorAll('.tab-btn')).find(b => b.dataset.target === 'tab-diagnostics');
-    if (_diagTabBtn) _diagTabBtn.addEventListener('click', () => setTimeout(_refreshDiagnosticsPanel, 50));
+    const _refreshOperationsPanel = async () => {
+        const summaryEl = document.getElementById('cpm-ops-summary');
+        if (!summaryEl) return;
+        const keys = await getCpmPluginStorageKeys();
+        const runtimeMeta = await _collectRuntimeMetadata('operations');
+        let bootStatusRaw = null;
+        let bootStatus = null;
+        try {
+            bootStatusRaw = await Risu.pluginStorage.getItem('cpm_last_boot_status');
+            if (bootStatusRaw) bootStatus = JSON.parse(String(bootStatusRaw));
+        } catch (_) { /* ignore */ }
+        summaryEl.innerHTML = `
+            <div><span class="text-gray-500">최근 새로고침:</span> <span class="text-white">${runtimeMeta.generatedAt}</span></div>
+            <div><span class="text-gray-500">관리 설정 키:</span> <span class="text-white">${SettingsBackup.getAllKeys().length}개</span></div>
+            <div><span class="text-gray-500">pluginStorage 키:</span> <span class="text-white">${keys.length}개</span></div>
+            <div><span class="text-gray-500">커스텀 모델:</span> <span class="text-white">${CUSTOM_MODELS_CACHE.length}개</span></div>
+            <div><span class="text-gray-500">API 로그:</span> <span class="text-white">${_getAllApiRequests().length}건</span></div>
+            <div><span class="text-gray-500">브릿지 경로:</span> <span class="text-white">${runtimeMeta.streamBridgeCapable ? 'ReadableStream 직통' : '호환성 fallback'}</span></div>
+            <div><span class="text-gray-500">스트리밍/호환성:</span> <span class="text-white">${runtimeMeta.streamingEnabled ? 'Streaming ON' : 'Streaming OFF'} / ${runtimeMeta.compatibilityMode ? 'Compat ON' : 'Compat OFF'}</span></div>
+            <div><span class="text-gray-500">마지막 부트 상태:</span> <span class="text-white">${bootStatus ? (bootStatus.settingsOk ? '정상' : '점검 필요') : (bootStatusRaw ? '기록 있음' : '기록 없음')}</span></div>
+            <div><span class="text-gray-500">내보내기 포맷:</span> <span class="text-white">설정 v${CPM_EXPORT_VERSION} / 진단 v2</span></div>
+            <div class="text-gray-600 mt-2">권장 순서: 설정 내보내기 → 진단 저장 → 필요 시 전체 정리</div>
+        `;
+    };
 
-    document.getElementById('cpm-diag-generate').addEventListener('click', () => {
-        const data = _buildDiagnosticsData();
+    // Auto-refresh diagnostics when its tab opens
+    const _diagTabBtn = Array.from(sidebar.querySelectorAll('.tab-btn')).find(b => /** @type {HTMLElement} */ (b).dataset.target === 'tab-diagnostics');
+    if (_diagTabBtn) _diagTabBtn.addEventListener('click', () => setTimeout(() => { _refreshDiagnosticsPanel(); }, 50));
+    const _opsTabBtn = Array.from(sidebar.querySelectorAll('.tab-btn')).find(b => /** @type {HTMLElement} */ (b).dataset.target === 'tab-operations');
+    if (_opsTabBtn) _opsTabBtn.addEventListener('click', () => setTimeout(() => { _refreshOperationsPanel(); }, 50));
+
+    document.getElementById('cpm-diag-generate').addEventListener('click', async () => {
+        const data = await _buildDiagnosticsData();
         const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(data, null, 2));
         const a = document.createElement('a');
         a.href = dataStr; a.download = `cupcake_diagnostics_${new Date().toISOString().slice(0, 10)}.json`;
         document.body.appendChild(a); a.click(); a.remove();
     });
 
-    document.getElementById('cpm-diag-generate-text').addEventListener('click', () => {
-        const d = _buildDiagnosticsData();
+    document.getElementById('cpm-diag-generate-text').addEventListener('click', async () => {
+        const d = await _buildDiagnosticsData();
         let text = `=== Cupcake PM v${d.cpmVersion} 진단 리포트 ===\n`;
         text += `생성 시각: ${d.timestamp}\n`;
         text += `User-Agent: ${d.userAgent}\n\n`;
+        text += `--- 메타데이터 ---\n`;
+        text += `진단 포맷: v${d.metadata?.formatVersion || 1}\n`;
+        text += `생성 주체: ${d.metadata?.generatedBy || 'manager-ui'}\n`;
+        text += `언어/시간대: ${d.metadata?.language || 'unknown'} / ${d.metadata?.timeZone || 'unknown'}\n`;
+        text += `플랫폼: ${d.metadata?.platform || 'unknown'}\n\n`;
         text += `--- 시스템 상태 ---\n`;
         text += `등록 프로바이더: ${d.ipcProviders}개\n`;
         text += `전체 모델: ${d.totalModels}개 (커스텀 ${d.customModels}개)\n`;
         text += `대기 요청: ${d.pendingRequests}개\n`;
         text += `API 로그: ${d.apiRequestLogSize}건\n`;
         text += `Abort 브릿지: ${d.abortBridgeProbed ? 'OK' : 'Pending'}\n\n`;
+        text += `ReadableStream 브릿지: ${d.streamBridgeCapable ? 'OK' : 'NO'}\n`;
+        text += `호환성 모드: ${d.compatibilityMode ? 'ON' : 'OFF'}\n`;
+        text += `Node-less: ${d.copilotNodelessMode}\n`;
+        text += `pluginStorage 키: ${d.pluginStorageKeys.length}개\n`;
+        text += `설정 백업 키: ${d.backupKeys}개\n\n`;
         text += `--- 프로바이더 ---\n`;
         d.registeredProviders.forEach(p => { text += `  ${p.name} (${p.pluginName}) — 모델 ${p.modelCount}개${p.supportsDynamicModels ? ' [동적]' : ''}\n`; });
+        text += `\n--- 슬롯 매핑 ---\n`;
+        d.slotAssignments.forEach((s) => { text += `  ${s.slot}: ${s.configuredId ? `[${s.provider || '?'}] ${s.modelName || s.configuredId}` : '미할당'}\n`; });
         text += `\n--- 최근 API 요청 ---\n`;
         d.recentApiRequests.forEach(r => { text += `  ${new Date(r.timestamp).toLocaleTimeString()} [${r.status}] ${r.model} ${r.duration ? r.duration + 'ms' : ''}\n`; });
         text += `\n--- 모든 모델 ---\n`;
@@ -2368,11 +3224,36 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     });
 
     document.getElementById('cpm-diag-copy-clipboard').addEventListener('click', async () => {
-        const d = _buildDiagnosticsData();
+        const d = await _buildDiagnosticsData();
         const text = JSON.stringify(d, null, 2);
         try { await navigator.clipboard.writeText(text); } catch { const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
-        alert('진단 데이터가 클립보드에 복사되었습니다.');
+        if (typeof globalThis.alert === 'function') globalThis.alert('진단 데이터가 클립보드에 복사되었습니다.');
     });
+
+    document.getElementById('cpm-ops-refresh-btn')?.addEventListener('click', async () => {
+        await _refreshOperationsPanel();
+        await _refreshDiagnosticsPanel();
+        if (typeof globalThis.alert === 'function') globalThis.alert('운영 상태를 새로고침했습니다.');
+    });
+
+    document.getElementById('cpm-ops-purge-btn')?.addEventListener('click', async () => {
+        const first = confirm('Cupcake Provider Manager가 저장한 운영 데이터를 모두 삭제할까요?');
+        if (!first) return;
+        const second = confirm('이 작업은 되돌릴 수 없습니다. CPM 저장 데이터를 정말 모두 지울까요?');
+        if (!second) return;
+        try {
+            await purgeAllCpmData();
+            await _refreshOperationsPanel();
+            await _refreshDiagnosticsPanel();
+            refreshCmList();
+            if (typeof globalThis.alert === 'function') globalThis.alert('CPM 저장 데이터를 모두 정리했습니다. 필요하면 설정 창을 다시 열어 상태를 확인하세요.');
+        } catch (error) {
+            console.warn('[CPM][ops] purge failed', error);
+            if (typeof globalThis.alert === 'function') globalThis.alert(`CPM 저장 데이터 정리에 실패했습니다: ${error?.message || String(error)}`);
+        }
+    });
+
+    void _refreshOperationsPanel();
 
     // ─── COPILOT TOKEN MANAGEMENT UI ───
     const _copilotResultEl = document.getElementById('cpm-copilot-result');
@@ -2492,7 +3373,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         alert('토큰이 복사되었습니다.');
     });
     document.getElementById('cpm-copilot-save').addEventListener('click', async () => {
-        const inp = document.getElementById('cpm-copilot-manual');
+        const inp = /** @type {HTMLInputElement} */ (document.getElementById('cpm-copilot-manual'));
         if (!inp || !inp.value.trim()) { alert('토큰을 입력하세요.'); return; }
         _setCopilotToken(inp.value.trim()); inp.value = '';
         await _copilotRefreshDisplay();
@@ -2518,16 +3399,17 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 </div>
             </div>`;
             document.body.appendChild(overlay);
-            overlay.querySelector('#dc-close').onclick = () => overlay.remove();
-            overlay.querySelector('#dc-cancel').onclick = () => overlay.remove();
-            overlay.querySelector('#dc-copy').onclick = () => { try { navigator.clipboard.writeText(dc.user_code); } catch {} };
-            overlay.querySelector('#dc-confirm').onclick = async function () {
-                this.disabled = true; this.textContent = '확인 중...';
+            /** @type {HTMLElement} */ (overlay.querySelector('#dc-close')).onclick = () => overlay.remove();
+            /** @type {HTMLElement} */ (overlay.querySelector('#dc-cancel')).onclick = () => overlay.remove();
+            /** @type {HTMLElement} */ (overlay.querySelector('#dc-copy')).onclick = () => { try { navigator.clipboard.writeText(dc.user_code); } catch {} };
+            const mConfirmBtn = /** @type {HTMLButtonElement} */ (overlay.querySelector('#dc-confirm'));
+            mConfirmBtn.onclick = async function () {
+                mConfirmBtn.disabled = true; mConfirmBtn.textContent = '확인 중...';
                 try {
                     const at = await _copilotExchangeAccessToken(dc.device_code);
                     _setCopilotToken(at); overlay.remove(); await _copilotRefreshDisplay();
                     _copilotShowSuccess('<strong>✅ 성공!</strong> 토큰이 생성 및 저장되었습니다.');
-                } catch (e) { this.disabled = false; this.textContent = '확인'; alert(e.message); }
+                } catch (e) { mConfirmBtn.disabled = false; mConfirmBtn.textContent = '확인'; alert(e.message); }
             };
         } catch (e) { _copilotShowError(e.message); }
     });
@@ -2599,11 +3481,24 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     // ─── EXPORT / IMPORT / CLOSE ───
     document.getElementById('cpm-export-btn').addEventListener('click', async () => {
         const keys = SettingsBackup.getAllKeys();
-        const exportData = {};
+        const exportSettings = {};
         for (const key of keys) {
             const val = await safeGetArg(key);
-            if (val !== undefined && val !== '') exportData[key] = val;
+            if (val !== undefined && val !== '') exportSettings[key] = normalizeManagedSettingValue(key, val);
         }
+        const pluginStorageSnapshot = await exportPluginStorageSnapshot();
+        const runtimeMeta = await _collectRuntimeMetadata('settings-export');
+        const exportData = {
+            _cpmExportVersion: CPM_EXPORT_VERSION,
+            metadata: {
+                ...runtimeMeta,
+                exportedSettingKeyCount: Object.keys(exportSettings).length,
+                exportedPluginStorageKeyCount: Object.keys(pluginStorageSnapshot).length,
+                hasCustomModels: Object.prototype.hasOwnProperty.call(exportSettings, 'cpm_custom_models'),
+            },
+            settings: exportSettings,
+            pluginStorage: pluginStorageSnapshot,
+        };
         const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportData, null, 2));
         const a = document.createElement('a');
         a.href = dataStr; a.download = 'cupcake_pm_settings.json';
@@ -2614,19 +3509,29 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         const input = document.createElement('input');
         input.type = 'file'; input.accept = '.json';
         input.onchange = e => {
-            const file = e.target.files[0]; if (!file) return;
+            const file = /** @type {HTMLInputElement} */ (e.target).files[0]; if (!file) return;
             const reader = new FileReader();
             reader.onload = async (event) => {
                 try {
-                    const data = JSON.parse(event.target.result);
-                    for (const [key, value] of Object.entries(data)) {
-                        setVal(key, value);
-                        const el = document.getElementById(key);
-                        if (el) { el.type === 'checkbox' ? (el.checked = parseUiBool(value)) : (el.value = value); }
+                    const data = JSON.parse(/** @type {string} */ (event.target.result));
+                    const envelope = normalizeImportEnvelope(data);
+                    for (const [key, value] of Object.entries(envelope.settings)) {
+                        const normalizedValue = normalizeManagedSettingValue(key, value);
+                        setVal(key, normalizedValue);
+                        const el = /** @type {HTMLInputElement} */ (document.getElementById(key));
+                        if (el) { el.type === 'checkbox' ? (el.checked = parseUiBool(normalizedValue)) : (el.value = normalizedValue); }
                     }
-                    alert('설정을 성공적으로 불러왔습니다!');
+                    await importPluginStorageSnapshot(envelope.pluginStorage);
+                    await refreshRuntimeStatusPanels();
+                    const importedMetaSummary = envelope.metadata?.generatedAt
+                        ? `\n내보낸 시각: ${envelope.metadata.generatedAt}`
+                        : '';
+                    const importedVersionSummary = envelope.exportVersion
+                        ? ` (포맷 v${envelope.exportVersion})`
+                        : '';
+                    if (typeof globalThis.alert === 'function') globalThis.alert(`설정을 성공적으로 불러왔습니다${importedVersionSummary}!${importedMetaSummary}`);
                     openCpmSettings();
-                } catch (err) { alert('설정 파일 오류: ' + err.message); }
+                } catch (err) { if (typeof globalThis.alert === 'function') globalThis.alert('설정 파일 오류: ' + err.message); }
             };
             reader.readAsText(file);
         };
@@ -2638,13 +3543,15 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         Risu.hideContainer();
     });
 
+    await refreshRuntimeStatusPanels();
+
     // Take snapshot
     await SettingsBackup.snapshotAll();
 }
 
 function persistCustomModels() {
     try {
-        const json = JSON.stringify(CUSTOM_MODELS_CACHE);
+        const json = serializeCustomModelsSetting(CUSTOM_MODELS_CACHE, { includeKey: true });
         setArg('cpm_custom_models', json);
         SettingsBackup.updateKey('cpm_custom_models', json);
     } catch (e) { console.error('[CPM] Failed to save custom models:', e); }
@@ -2655,35 +3562,190 @@ function persistCustomModels() {
 // MAIN INIT
 // ==========================================
 (async () => {
+    /** @type {string} Boot phase tracker for diagnostics */
+    let _bootPhase = 'pre-init';
+    /** @type {string[]} Completed phases log */
+    const _completedPhases = [];
+    /** @type {string[]} Failed phases log */
+    const _failedPhases = [];
+    let _modelRegCount = 0;
+
+    const _phaseStart = (/** @type {string} */ phase) => { _bootPhase = phase; };
+    const _phaseDone = (/** @type {string} */ phase) => { _completedPhases.push(phase); };
+    const _phaseFail = (/** @type {string} */ phase, /** @type {any} */ err) => {
+        _failedPhases.push(`${phase}: ${err?.message || err}`);
+        console.error(`[CPM] Phase '${phase}' failed (continuing):`, err?.message || err);
+    };
+
+    // ══════════════════════════════════════════════════════════════════
+    //  CRITICAL FIRST: Register settings panel IMMEDIATELY.
+    //  This MUST happen before any model registration, IPC setup,
+    //  custom model loading, or anything else.
+    //  If later init steps fail, the "🧁" menu entry still exists
+    //  and users can still open CPM settings to diagnose/reconfigure.
+    //  (Migrated from _temp_repo/init.js boot order — crash defense)
+    // ══════════════════════════════════════════════════════════════════
+    let _settingsRegistered = false;
+    try {
+        _phaseStart('register-settings');
+        await Risu.registerSetting(
+            `v${CPM_VERSION}`,
+            openCpmSettings,
+            '🧁',
+            'html',
+        );
+        _settingsRegistered = true;
+        _phaseDone('register-settings');
+        console.log(`[CPM] ✓ Settings panel registered (v${CPM_VERSION})`);
+    } catch (e) {
+        _phaseFail('register-settings', e);
+    }
+
     try {
         console.log(`[CPM] Cupcake Provider Manager v${CPM_VERSION} (IPC Mode) initializing...`);
 
-        await SettingsBackup.load();
-        const restoredCount = await SettingsBackup.restoreIfEmpty();
-        if (restoredCount > 0) console.log(`[CPM] Restored ${restoredCount} settings from backup`);
+        // ── Phase: Restore Settings Backup ──
+        _phaseStart('settings-restore');
+        try {
+            await SettingsBackup.load();
+            const restoredCount = await SettingsBackup.restoreIfEmpty();
+            if (restoredCount > 0) console.log(`[CPM] Restored ${restoredCount} settings from backup`);
+            _phaseDone('settings-restore');
+        } catch (e) { _phaseFail('settings-restore', e); }
 
-        // Load custom models
+        // ── Phase: Copilot Version Overrides ──
+        _phaseStart('copilot-version-overrides');
+        try {
+            const userChatVer = await safeGetArg('cpm_copilot_chat_version', '');
+            const userCodeVer = await safeGetArg('cpm_copilot_vscode_version', '');
+            setCopilotVersionOverrides({ chatVersion: userChatVer, vscodeVersion: userCodeVer });
+            if (userChatVer || userCodeVer) {
+                console.log(`[CPM] Copilot version overrides applied — chat: ${userChatVer || '(default)'}, vscode: ${userCodeVer || '(default)'}`);
+            }
+            _phaseDone('copilot-version-overrides');
+        } catch (e) { _phaseFail('copilot-version-overrides', e); }
+
+        // ── Phase: Streaming Bridge Capability Check ──
+        _phaseStart('streaming-check');
+        try {
+            const streamCapable = await checkStreamCapability();
+            const streamEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+            const compatMode = await safeGetBoolArg('cpm_compatibility_mode', false);
+
+            if (compatMode) {
+                console.log('[CPM] 🔧 Compatibility mode: ENABLED (nativeFetch skipped + streaming forced OFF).');
+            } else if (!streamCapable) {
+                console.log('[CPM] 🔧 Compatibility mode: AUTO-ACTIVE (bridge cannot transfer ReadableStream).');
+            }
+
+            if (streamEnabled) {
+                if (compatMode || !streamCapable) {
+                    console.warn('[CPM] 🔄 Streaming: enabled but OVERRIDDEN by compatibility mode.');
+                } else {
+                    console.log('[CPM] 🔄 Streaming: enabled AND bridge capable.');
+                }
+            } else {
+                console.log(`[CPM] 🔄 Streaming: disabled (bridge ${streamCapable ? 'capable' : 'not capable'}).`);
+            }
+            _phaseDone('streaming-check');
+        } catch (e) { _phaseFail('streaming-check', e); }
+
+        // ── Phase: Custom Models Migration (includes C1-C9 backward compat) ──
+        _phaseStart('custom-models');
         try {
             const raw = await safeGetArg('cpm_custom_models', '[]');
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-                CUSTOM_MODELS_CACHE.push(...parsed.filter(m => m && typeof m === 'object'));
-            } else if (parsed && typeof parsed === 'object') {
-                CUSTOM_MODELS_CACHE.push(parsed);
-                console.warn('[CPM] cpm_custom_models was a single object; migrated to array in memory');
+            const parsed = parseCustomModelsValue(raw);
+            if (parsed.length > 0) {
+                CUSTOM_MODELS_CACHE.push(...parsed.map((m) => {
+                    const normalized = normalizeCustomModel(m, { includeKey: true, includeUniqueId: true });
+                    if (!normalized.uniqueId) {
+                        normalized.uniqueId = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+                    }
+                    return normalized;
+                }));
+            } else {
+                try {
+                    const single = JSON.parse(raw);
+                    if (single && typeof single === 'object' && !Array.isArray(single)) {
+                        const normalized = normalizeCustomModel(single, { includeKey: true, includeUniqueId: true });
+                        if (!normalized.uniqueId) {
+                            normalized.uniqueId = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+                        }
+                        CUSTOM_MODELS_CACHE.push(normalized);
+                        console.warn('[CPM] cpm_custom_models was a single object; migrated to array in memory');
+                    }
+                } catch (_) { /* raw wasn't valid single-object JSON either */ }
             }
-        } catch (e) { console.warn('[CPM] Failed to parse custom models', e); }
-        for (const m of CUSTOM_MODELS_CACHE) {
-            ALL_DEFINED_MODELS.push({ uniqueId: m.uniqueId, id: m.model, name: m.name || m.uniqueId, provider: 'Custom' });
-        }
 
+            // ── Backward Compatibility: Auto-Migrate from C1-C9 to JSON ──
+            // (Migrated from _temp_repo/init.js — users upgrading from old CPM
+            //  had individual cpm_c{1-9}_url/model/key/... settings that must be
+            //  converted to the JSON cpm_custom_models array format.)
+            if (CUSTOM_MODELS_CACHE.length === 0) {
+                let migrated = false;
+                for (let i = 1; i <= 9; i++) {
+                    const legacyUrl = await safeGetArg(`cpm_c${i}_url`);
+                    const legacyModel = await safeGetArg(`cpm_c${i}_model`);
+                    const legacyKey = await safeGetArg(`cpm_c${i}_key`);
+                    if (!legacyUrl && !legacyModel && !legacyKey) continue;
+                    CUSTOM_MODELS_CACHE.push({
+                        uniqueId: `custom${i}`,
+                        name: await safeGetArg(`cpm_c${i}_name`) || `Custom ${i}`,
+                        model: legacyModel || '',
+                        url: legacyUrl || '',
+                        key: legacyKey || '',
+                        format: await safeGetArg(`cpm_c${i}_format`) || 'openai',
+                        sysfirst: await safeGetBoolArg(`cpm_c${i}_sysfirst`),
+                        altrole: await safeGetBoolArg(`cpm_c${i}_altrole`),
+                        mustuser: await safeGetBoolArg(`cpm_c${i}_mustuser`),
+                        maxout: await safeGetBoolArg(`cpm_c${i}_maxout`),
+                        mergesys: await safeGetBoolArg(`cpm_c${i}_mergesys`),
+                        decoupled: await safeGetBoolArg(`cpm_c${i}_decoupled`),
+                        thought: await safeGetBoolArg(`cpm_c${i}_thought`),
+                        reasoning: await safeGetArg(`cpm_c${i}_reasoning`) || 'none',
+                        verbosity: await safeGetArg(`cpm_c${i}_verbosity`) || 'none',
+                        thinking: await safeGetArg(`cpm_c${i}_thinking`) || 'none',
+                        responsesMode: 'auto',
+                        tok: await safeGetArg(`cpm_c${i}_tok`) || 'o200k_base',
+                        customParams: '',
+                    });
+                    migrated = true;
+                }
+                if (migrated) {
+                    try {
+                        const migratedJson = JSON.stringify(CUSTOM_MODELS_CACHE);
+                        await setArg('cpm_custom_models', migratedJson);
+                        SettingsBackup.updateKey('cpm_custom_models', migratedJson);
+                        console.log(`[CPM] ✓ Migrated ${CUSTOM_MODELS_CACHE.length} legacy C1-C9 models to JSON format`);
+                    } catch (me) { console.warn('[CPM] C1-C9 migration save failed:', me); }
+                }
+            }
+
+            for (const m of CUSTOM_MODELS_CACHE) {
+                ALL_DEFINED_MODELS.push({ uniqueId: m.uniqueId, id: m.model, name: m.name || m.uniqueId, provider: 'Custom' });
+            }
+
+            // Diagnostic: log proxyUrl state for all custom models at boot
+            if (CUSTOM_MODELS_CACHE.length > 0) {
+                const proxyInfo = CUSTOM_MODELS_CACHE.map((m) =>
+                    `${m.name||m.uniqueId}: proxyUrl=${m.proxyUrl ? `"${m.proxyUrl}"` : '(empty)'}`
+                ).join(', ');
+                console.log(`[CPM] Custom models loaded (${CUSTOM_MODELS_CACHE.length}): ${proxyInfo}`);
+            }
+            _phaseDone('custom-models');
+        } catch (e) { _phaseFail('custom-models', e); }
+
+        // ── Phase: IPC Channel Setup ──
+        _phaseStart('ipc-setup');
         // IPC 리스너 설정 (반드시 addProvider 전에!)
         setupControlChannel();
         setupResponseListener();
+        setupChannelCleanup(Risu, [CH.CONTROL, CH.RESPONSE]);
 
         // 서브플러그인 초기 등록 대기 (프로바이더 재시도 주기: 500ms~)
         // 대부분 1초 내 등록 완료, late registration도 지원하므로 짧게
         await new Promise(r => setTimeout(r, 1000));
+        _phaseDone('ipc-setup');
 
         console.log(`[CPM] ${registeredProviders.size} providers registered, ${ALL_DEFINED_MODELS.length} models total`);
 
@@ -2692,69 +3754,139 @@ function persistCustomModels() {
             return p !== 0 ? p : a.name.localeCompare(b.name);
         });
 
-        // 모든 모델 등록
-        for (const modelDef of ALL_DEFINED_MODELS) {
-            await registerModelWithRisu(modelDef);
+        // ── Phase: Model Registration with RisuAI ──
+        _phaseStart('model-registration');
+        try {
+            for (const modelDef of ALL_DEFINED_MODELS) {
+                await registerModelWithRisu(modelDef);
+                _modelRegCount++;
+            }
+            managerReady = true;
+            _phaseDone('model-registration');
+        } catch (regErr) {
+            _phaseFail('model-registration', regErr);
+            console.error(`[CPM] Model registration stopped at ${_modelRegCount}/${ALL_DEFINED_MODELS.length}`);
         }
-        managerReady = true;
 
-        // 설정 UI 등록
-        await Risu.registerSetting(`v${CPM_VERSION}`, openCpmSettings, '🧁', 'html');
-
-        // 키보드 단축키 + 터치 제스처
+        // ── Phase: Keyboard Shortcut + Touch Gesture ──
+        // (Migrated from _temp_repo/init.js — includes handler cleanup on re-init)
+        _phaseStart('hotkey-registration');
         try {
             const rootDoc = await Risu.getRootDocument();
-            await rootDoc.addEventListener('keydown', (e) => {
-                if (e.ctrlKey && e.shiftKey && e.altKey && (e.key === 'p' || e.key === 'P')) openCpmSettings();
-            });
-            let activePointers = 0, pointerTimer = null;
-            const addPointer = () => {
-                activePointers++;
-                if (activePointers >= 4) { openCpmSettings(); activePointers = 0; }
-                if (pointerTimer) clearTimeout(pointerTimer);
-                pointerTimer = setTimeout(() => { activePointers = 0; }, 500);
-            };
-            const removePointer = () => { activePointers = Math.max(0, activePointers - 1); };
-            await rootDoc.addEventListener('pointerdown', addPointer);
-            await rootDoc.addEventListener('pointerup', removePointer);
-            await rootDoc.addEventListener('pointercancel', removePointer);
-        } catch (err) { console.error('[CPM] Hotkey registration failed:', err); }
+            if (rootDoc) {
+                // Remove previously registered handlers to prevent double-firing on re-init
+                if (typeof globalThis !== 'undefined') {
+                    const g = /** @type {any} */ (globalThis);
+                    if (g._cpmKeydownHandler) {
+                        try { await rootDoc.removeEventListener('keydown', g._cpmKeydownHandler); } catch (_) {}
+                    }
+                    if (g._cpmAddPointerHandler) {
+                        try { await rootDoc.removeEventListener('pointerdown', g._cpmAddPointerHandler); } catch (_) {}
+                        try { await rootDoc.removeEventListener('pointerup', g._cpmRemovePointerHandler); } catch (_) {}
+                        try { await rootDoc.removeEventListener('pointercancel', g._cpmRemovePointerHandler); } catch (_) {}
+                    }
+                }
+
+                const _keydownHandler = (/** @type {any} */ e) => {
+                    if (e.ctrlKey && e.shiftKey && e.altKey && (e.key === 'p' || e.key === 'P')) openCpmSettings();
+                };
+                await rootDoc.addEventListener('keydown', _keydownHandler);
+
+                // 4-finger touch gesture for mobile
+                let activePointers = 0;
+                /** @type {ReturnType<typeof setTimeout> | null} */
+                let pointerTimer = null;
+                const addPointer = () => {
+                    activePointers++;
+                    if (activePointers >= 4) { openCpmSettings(); activePointers = 0; }
+                    if (pointerTimer) clearTimeout(pointerTimer);
+                    pointerTimer = setTimeout(() => { activePointers = 0; }, 500);
+                };
+                const removePointer = () => { activePointers = Math.max(0, activePointers - 1); };
+
+                await rootDoc.addEventListener('pointerdown', addPointer);
+                await rootDoc.addEventListener('pointerup', removePointer);
+                await rootDoc.addEventListener('pointercancel', removePointer);
+
+                // Store handler references for cleanup on re-init
+                if (typeof globalThis !== 'undefined') {
+                    const g = /** @type {any} */ (globalThis);
+                    g._cpmKeydownHandler = _keydownHandler;
+                    g._cpmAddPointerHandler = addPointer;
+                    g._cpmRemovePointerHandler = removePointer;
+                }
+            }
+            _phaseDone('hotkey-registration');
+        } catch (err) {
+            _phaseFail('hotkey-registration', err);
+        }
 
         // 초기 백업
         await SettingsBackup.snapshotAll();
 
-        // Auto-updater: retry pending updates from previous boot
+        // ── Phase: Auto-updater ──
+        _phaseStart('auto-updater');
         try { await AutoUpdater.retryPendingUpdateOnBoot(); } catch (e) { console.warn('[CPM] Boot retry failed:', e); }
-
         // Auto-updater: background version check (non-blocking)
         AutoUpdater.checkVersionsQuiet().catch(() => {});
         // JS fallback version check (10s delay to avoid fetch contention)
         setTimeout(() => { AutoUpdater.checkMainPluginVersionQuiet().catch(() => {}); }, 10000);
+        _phaseDone('auto-updater');
 
-        console.log(`[CPM] ✓ Initialization complete. ${ALL_DEFINED_MODELS.length} models available.`);
-    } catch (e) {
-        console.error('[CPM] Init failed:', e);
-        // CRITICAL FALLBACK: Ensure settings panel is still accessible for error diagnosis
+        // ── Boot Summary ──
+        if (_failedPhases.length > 0) {
+            console.warn(`[CPM] Boot completed with ${_failedPhases.length} warning(s):`, _failedPhases);
+        }
+        console.log(`[CPM] ✓ Boot complete — ${_completedPhases.length} phases OK, ${_failedPhases.length} failed, ${_modelRegCount} models registered.`);
+
+        // Record boot health for diagnostics (migrated from _temp_repo/init.js)
         try {
-            await Risu.registerSetting(
-                `⚠️ CPM v${CPM_VERSION} (Error)`,
-                async () => {
-                    const rootDoc = await Risu.getRootDocument();
-                    const body = await rootDoc.querySelector('body');
-                    const errorPanel = await rootDoc.createElement('div');
-                    await errorPanel.setStyleAttribute('position:fixed;top:0;left:0;right:0;bottom:0;background:#1a1a2e;color:#fff;padding:40px;font-family:sans-serif;z-index:99999;overflow:auto;');
-                    const errorText = String(e && e.stack ? e.stack : e).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    await errorPanel.setInnerHTML(`
-                        <h1 style="color:#ff6b6b;">🧁 Cupcake PM — Initialization Error</h1>
-                        <p style="color:#ccc;margin:20px 0;">The plugin failed to initialize properly.</p>
-                        <pre style="background:#0d1117;color:#ff7b72;padding:16px;border-radius:8px;overflow:auto;max-height:300px;font-size:13px;">${errorText}</pre>
-                        <p style="color:#aaa;margin-top:20px;">Try: reload (Ctrl+Shift+R) or re-import the plugin.</p>
-                    `);
-                    await body.appendChild(errorPanel);
-                },
-                '🧁',
-                'html',
-            );
-        } catch (_) { /* Last resort */ }
+            await Risu.pluginStorage.setItem('cpm_last_boot_status', JSON.stringify({
+                ts: Date.now(), version: CPM_VERSION,
+                ok: _completedPhases, fail: _failedPhases,
+                models: _modelRegCount, settingsOk: _settingsRegistered,
+            }));
+        } catch (_) { /* pluginStorage may not be available */ }
+
+    } catch (e) {
+        const _errAny = /** @type {any} */ (e);
+        console.error(`[CPM] Unexpected init fail at phase '${_bootPhase}':`, e);
+        console.error(`[CPM] Completed phases before crash:`, _completedPhases);
+
+        // FALLBACK: If settings weren't registered earlier, try one more time
+        if (!_settingsRegistered) {
+            try {
+                await Risu.registerSetting(
+                    `⚠️ CPM v${CPM_VERSION} (Error)`,
+                    async () => {
+                        const rootDoc = await Risu.getRootDocument();
+                        const body = await rootDoc.querySelector('body');
+                        const errorPanel = await rootDoc.createElement('div');
+                        await errorPanel.setStyleAttribute('position:fixed;top:0;left:0;right:0;bottom:0;background:#1a1a2e;color:#fff;padding:40px;font-family:sans-serif;z-index:99999;overflow:auto;');
+                        const errorText = String(_errAny && _errAny.stack ? _errAny.stack : _errAny).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        await errorPanel.setInnerHTML(`
+                            <h1 style="color:#ff6b6b;">🧁 Cupcake PM — Initialization Error</h1>
+                            <p style="color:#ccc;margin:20px 0;">The plugin failed to initialize properly.</p>
+                            <p style="color:#aaa;">Failed at phase: <code>${_bootPhase}</code></p>
+                            <p style="color:#aaa;">Completed: ${_completedPhases.join(', ') || 'none'}</p>
+                            <pre style="background:#0d1117;color:#ff7b72;padding:16px;border-radius:8px;overflow:auto;max-height:300px;font-size:13px;">${errorText}</pre>
+                            <p style="color:#aaa;margin-top:20px;">Try: reload (Ctrl+Shift+R) or re-import the plugin.</p>
+                        `);
+                        await body.appendChild(errorPanel);
+                    },
+                    '🧁',
+                    'html',
+                );
+            } catch { /* Last resort — settings were already registered above in most cases */ }
+        }
+
+        // Record failed boot status
+        try {
+            await Risu.pluginStorage.setItem('cpm_last_boot_status', JSON.stringify({
+                ts: Date.now(), version: CPM_VERSION,
+                ok: _completedPhases, fail: [..._failedPhases, `FATAL:${_bootPhase}: ${_errAny?.message || _errAny}`],
+                models: _modelRegCount, settingsOk: _settingsRegistered,
+            }));
+        } catch (_) { /* ignore */ }
     }
 })();

@@ -95,10 +95,10 @@ describe('validateGeminiParams', () => {
         expect(gc.topK).toBeUndefined();
     });
 
-    it('frequencyPenalty 경계값 ≥2 → 삭제 (배타적 상한)', () => {
+    it('frequencyPenalty 경계값 2 → 유지 (포함적 상한)', () => {
         const gc = { frequencyPenalty: 2 };
         validateGeminiParams(gc);
-        expect(gc.frequencyPenalty).toBeUndefined();
+        expect(gc.frequencyPenalty).toBe(2);
     });
 
     it('null/undefined 입력 → 에러 없음', () => {

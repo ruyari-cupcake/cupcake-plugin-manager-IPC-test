@@ -9,17 +9,14 @@ export default defineConfig({
             provider: 'v8',
             include: ['src/shared/**/*.js'],
             exclude: [
-                'src/manager/**',
-                'src/features/**',
-                'src/providers/**',
-                'src/shared/aws-signer.js',  // Web Crypto API 의존 — 런타임 전용
-                'src/shared/helpers.js',      // RisuAI 런타임 API 의존 — 런타임 전용
+                'src/shared/tailwind-css.generated.js',  // 생성 파일
             ],
+            reporter: ['text', 'json-summary', 'json'],
             thresholds: {
-                statements: 70,
-                branches: 55,
+                statements: 80,
+                branches: 70,
                 functions: 80,
-                lines: 70,
+                lines: 80,
             },
         },
     },

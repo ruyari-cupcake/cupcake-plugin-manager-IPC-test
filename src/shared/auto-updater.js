@@ -16,6 +16,37 @@
  *   - Concurrent dedup via _mainUpdateInFlight
  */
 
+import { safeSetDatabaseLite } from './safe-db-writer.js';
+
+// ────────────────────────────────────────────────────────────────
+// Timeout utility — clearTimeout cleanup prevents dangling timers
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Race a promise against a timeout with proper cleanup.
+ * Prevents dangling timer handles during tests and retries.
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} message
+ * @returns {Promise<T>}
+ */
+export function _withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), ms);
+        Promise.resolve(promise).then(
+            value => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            error => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+}
+
 // ────────────────────────────────────────────────────────────────
 // SHA-256 utility
 // ────────────────────────────────────────────────────────────────
@@ -228,10 +259,10 @@ export function createAutoUpdater(deps) {
         try {
             const bundleUrl = updateBundleUrl + '?_t=' + Date.now() + '&_r=' + Math.random().toString(36).substr(2, 6);
             console.log(`${LOG} Trying update bundle first: ${bundleUrl}`);
-            const bundleResult = await Promise.race([
+            const bundleResult = await _withTimeout(
                 Risu.risuFetch(bundleUrl, { method: 'GET', plainFetchForce: true }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('update bundle fetch timed out (20s)')), 20000)),
-            ]);
+                20000, 'update bundle fetch timed out (20s)'
+            );
 
             if (bundleResult?.data && (!bundleResult.status || bundleResult.status < 400)) {
                 const rawBundle = typeof bundleResult.data === 'string' ? JSON.parse(bundleResult.data) : bundleResult.data;
@@ -280,10 +311,10 @@ export function createAutoUpdater(deps) {
         let _fallbackExpectedSha256 = null;
         try {
             const vUrl = versionsUrl + '?_t=' + Date.now();
-            const vRes = await Promise.race([
+            const vRes = await _withTimeout(
                 Risu.risuFetch(vUrl, { method: 'GET', plainFetchForce: true }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('versions manifest timed out (10s)')), 10000)),
-            ]);
+                10000, 'versions manifest timed out (10s)'
+            );
             if (vRes?.data) {
                 const vData = typeof vRes.data === 'string' ? JSON.parse(vRes.data) : vRes.data;
                 _fallbackExpectedSha256 = vData?.[pluginName]?.sha256 || null;
@@ -302,16 +333,16 @@ export function createAutoUpdater(deps) {
 
                 let response;
                 try {
-                    response = await Promise.race([
+                    response = await _withTimeout(
                         Risu.nativeFetch(cacheBuster, { method: 'GET' }),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('nativeFetch timed out (20s)')), 20000)),
-                    ]);
+                        20000, 'nativeFetch timed out (20s)'
+                    );
                 } catch (nativeErr) {
                     console.warn(`${LOG} nativeFetch failed, falling back to risuFetch:`, /** @type {any} */ (nativeErr).message || nativeErr);
-                    const risuResult = await Promise.race([
+                    const risuResult = await _withTimeout(
                         Risu.risuFetch(cacheBuster, { method: 'GET', plainFetchForce: true }),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('risuFetch fallback timed out (20s)')), 20000)),
-                    ]);
+                        20000, 'risuFetch fallback timed out (20s)'
+                    );
                     if (!risuResult.data || (risuResult.status && risuResult.status >= 400)) {
                         throw new Error(`risuFetch failed with status ${risuResult.status}`);
                     }
@@ -332,10 +363,10 @@ export function createAutoUpdater(deps) {
                     throw new Error(`HTTP ${response.status}`);
                 }
 
-                const text = await Promise.race([
+                const text = await _withTimeout(
                     response.text(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('response body read timed out (20s)')), 20000)),
-                ]);
+                    20000, 'response body read timed out (20s)'
+                );
 
                 const contentLength = parseInt(response.headers?.get?.('content-length') || '0', 10);
                 if (contentLength > 0) {
@@ -521,7 +552,10 @@ export function createAutoUpdater(deps) {
 
             const nextPlugins = db.plugins.slice();
             nextPlugins[existingIdx] = updatedPlugin;
-            await Risu.setDatabaseLite({ plugins: nextPlugins });
+            const writeResult = await safeSetDatabaseLite(Risu, { plugins: nextPlugins });
+            if (!writeResult.ok) {
+                return { ok: false, error: `DB write rejected: ${writeResult.error}` };
+            }
 
             // Post-write verification
             try {
@@ -696,8 +730,7 @@ export function createAutoUpdater(deps) {
             console.log(`[CPM AutoCheck] Fetching version manifest...`);
 
             const fetchPromise = Risu.risuFetch(cacheBuster, { method: 'GET', plainFetchForce: true });
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Version manifest fetch timed out (15s)')), 15000));
-            const result = await Promise.race([fetchPromise, timeoutPromise]);
+            const result = await _withTimeout(fetchPromise, 15000, 'Version manifest fetch timed out (15s)');
 
             if (!result.data || (result.status && result.status >= 400)) {
                 console.warn(`[CPM AutoCheck] Fetch failed (status=${result.status}), silently skipped.`);
@@ -766,26 +799,26 @@ export function createAutoUpdater(deps) {
 
             let code;
             try {
-                const response = await Promise.race([
+                const response = await _withTimeout(
                     Risu.nativeFetch(cacheBuster, { method: 'GET' }),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('nativeFetch timed out (20s)')), 20000)),
-                ]);
+                    20000, 'nativeFetch timed out (20s)'
+                );
                 if (!response.ok || response.status < 200 || response.status >= 300) {
                     console.warn(`[CPM MainAutoCheck] nativeFetch failed (HTTP ${response.status}), skipped.`);
                     return;
                 }
-                code = await Promise.race([
+                code = await _withTimeout(
                     response.text(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('nativeFetch body read timed out (20s)')), 20000)),
-                ]);
+                    20000, 'nativeFetch body read timed out (20s)'
+                );
                 console.log(`[CPM MainAutoCheck] nativeFetch OK (${(code.length / 1024).toFixed(1)}KB)`);
             } catch (/** @type {any} */ nativeErr) {
                 console.warn(`[CPM MainAutoCheck] nativeFetch failed: ${nativeErr.message || nativeErr}, trying risuFetch...`);
                 try {
-                    const result = await Promise.race([
+                    const result = await _withTimeout(
                         Risu.risuFetch(cacheBuster, { method: 'GET', plainFetchForce: true }),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('risuFetch timed out (20s)')), 20000)),
-                    ]);
+                        20000, 'risuFetch timed out (20s)'
+                    );
                     if (!result.data || (result.status && result.status >= 400)) {
                         console.warn(`[CPM MainAutoCheck] risuFetch also failed (status=${result.status}), skipped.`);
                         return;

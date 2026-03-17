@@ -6,6 +6,41 @@
 import { getRisu } from './ipc-protocol.js';
 
 /**
+ * Race a fetch promise against an AbortSignal for mid-flight cancellation.
+ * V3 bridge cannot relay abort in the guest→host direction, so we monitor
+ * the signal locally and reject if it fires during the in-flight request.
+ *
+ * @template T
+ * @param {Promise<T>} fetchPromise - The in-flight fetch (already started without signal)
+ * @param {AbortSignal | null | undefined} signal - The original signal to monitor
+ * @returns {Promise<T>}
+ */
+export function _raceWithAbortSignal(fetchPromise, signal) {
+    if (!signal) return fetchPromise;
+    if (signal.aborted) {
+        return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+    }
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+            if (!settled) {
+                settled = true;
+                reject(new DOMException('The operation was aborted.', 'AbortError'));
+            }
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        fetchPromise.then(
+            (result) => {
+                if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); resolve(result); }
+            },
+            (error) => {
+                if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); reject(error); }
+            }
+        );
+    });
+}
+
+/**
  * RisuAI argument 안전 조회
  * @param {string} key 인수 키
  * @param {string} [defaultValue=''] 기본값
@@ -98,6 +133,39 @@ export function safeStringify(obj) {
     });
 }
 
+function normalizeBooleanSetting(value, defaultValue = false) {
+    if (value === true || value === false) return value;
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (!raw || raw === 'undefined' || raw === 'null') return defaultValue;
+    if (raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on') return true;
+    if (raw === 'false' || raw === '0' || raw === 'no' || raw === 'off') return false;
+    return defaultValue;
+}
+
+let _compatibilityModeCache = null;
+
+export function _resetCompatibilityModeCache() {
+    _compatibilityModeCache = null;
+}
+
+export function isCompatibilityModeSettingEnabled(value) {
+    return normalizeBooleanSetting(value, false);
+}
+
+export async function isCompatibilityModeEnabled() {
+    if (_compatibilityModeCache === null) {
+        _compatibilityModeCache = await safeGetBoolArg('cpm_compatibility_mode', false);
+    }
+    return _compatibilityModeCache;
+}
+
+export function shouldEnableStreaming(settings = {}, options = {}) {
+    const streamingEnabled = normalizeBooleanSetting(settings?.cpm_streaming_enabled, false);
+    const compatibilityMode = isCompatibilityModeSettingEnabled(settings?.cpm_compatibility_mode);
+    const isCopilot = options?.isCopilot === true;
+    return streamingEnabled && (!compatibilityMode || isCopilot);
+}
+
 function getHeaderValue(headers, key) {
     if (!headers) return '';
     const lowerKey = String(key || '').toLowerCase();
@@ -149,7 +217,7 @@ export function _stripNonSerializable(obj, depth = 0) {
 
 function sanitizeBodyForBridge(bodyObj) {
     if (!bodyObj || typeof bodyObj !== 'object') return bodyObj;
-    let safe = _stripNonSerializable(bodyObj);
+    const safe = _stripNonSerializable(bodyObj);
     if (Array.isArray(safe.messages)) {
         try {
             const rawMsgs = JSON.parse(JSON.stringify(safe.messages));
@@ -230,6 +298,7 @@ export async function smartFetch(url, options = {}) {
 
     // Copilot API: nativeFetch first (CORS not reliably supported)
     const isCopilotUrl = url.includes('githubcopilot.com') || url.includes('copilot_internal');
+    const compatibilityMode = await isCompatibilityModeEnabled();
     if (isCopilotUrl) {
         // Strategy A: nativeFetch (proxy-based, bypasses CORS)
         try {
@@ -240,7 +309,7 @@ export async function smartFetch(url, options = {}) {
             if (typeof nfOptions.body === 'string') {
                 nfOptions.body = new TextEncoder().encode(nfOptions.body);
             }
-            const nativeRes = await Risu.nativeFetch(url, nfOptions);
+            const nativeRes = await _raceWithAbortSignal(Risu.nativeFetch(url, nfOptions), _localAbortSignal);
             if (nativeRes && (nativeRes.ok || (nativeRes.status && nativeRes.status !== 0))) {
                 // For 4xx client errors, return as-is so caller sees exact error
                 try {
@@ -258,6 +327,7 @@ export async function smartFetch(url, options = {}) {
                 return nativeRes;
             }
         } catch (e) {
+            if (e.name === 'AbortError') throw e;
             console.log(`[smartFetch] Copilot nativeFetch error: ${e.message}, trying fallback`);
         }
 
@@ -278,13 +348,13 @@ export async function smartFetch(url, options = {}) {
 
                 bodyObj = sanitizeBodyForBridge(bodyObj);
 
-                const result = await Risu.risuFetch(url, {
+                const result = await _raceWithAbortSignal(Risu.risuFetch(url, {
                     method: options.method || 'POST',
                     headers: options.headers || {},
                     body: bodyObj,
                     rawResponse: true,
                     plainFetchDeforce: true,
-                });
+                }), _localAbortSignal);
                 if (result && result.data != null && (result.status && result.status !== 0)) {
                     const responseBody = toResponseBody(result.data, result.status);
                     if (!responseBody) throw new Error('Invalid proxy-forced response body');
@@ -303,6 +373,7 @@ export async function smartFetch(url, options = {}) {
                     });
                 }
             } catch (e) {
+                if (e.name === 'AbortError') throw e;
                 console.log(`[smartFetch] Copilot proxy-forced error: ${e.message}`);
             }
         }
@@ -322,13 +393,13 @@ export async function smartFetch(url, options = {}) {
 
                 bodyObj = sanitizeBodyForBridge(bodyObj);
 
-                const result = await Risu.risuFetch(url, {
+                const result = await _raceWithAbortSignal(Risu.risuFetch(url, {
                     method: options.method || 'POST',
                     headers: options.headers || {},
                     body: bodyObj,
                     rawResponse: true,
                     plainFetchForce: true,
-                });
+                }), _localAbortSignal);
                 if (result && result.data != null) {
                     const hasRealHeaders = hasHeaders(result.headers);
                     // Return when: real headers exist, OR request succeeded, OR status is 4xx (real API error)
@@ -350,6 +421,7 @@ export async function smartFetch(url, options = {}) {
                     });
                 }
             } catch (e) {
+                if (e.name === 'AbortError') throw e;
                 console.log(`[smartFetch] Copilot plainFetch error: ${e.message}`);
             }
         }
@@ -377,13 +449,13 @@ export async function smartFetch(url, options = {}) {
             // 직렬화 안전 보증 (postMessage 경유 시)
             bodyObj = sanitizeBodyForBridge(bodyObj);
 
-            const result = await Risu.risuFetch(url, {
+            const result = await _raceWithAbortSignal(Risu.risuFetch(url, {
                 method: options.method || 'POST',
                 headers: options.headers || {},
                 body: bodyObj,
                 rawResponse: true,
                 plainFetchForce: true,
-            });
+            }), _localAbortSignal);
 
             if (result && result.data != null) {
                 // 실제 API 응답 vs 로컬/CORS 에러 구분:
@@ -405,6 +477,7 @@ export async function smartFetch(url, options = {}) {
 
             console.log(`[smartFetch] Direct fetch unusable, falling back to proxy`);
         } catch (e) {
+            if (e.name === 'AbortError') throw e;
             console.log(`[smartFetch] Direct fetch error: ${e.message}, falling back to proxy`);
         }
     }
@@ -417,6 +490,9 @@ export async function smartFetch(url, options = {}) {
     if (typeof nfOptions.body === 'string') {
         nfOptions.body = new TextEncoder().encode(nfOptions.body);
     }
+    if (compatibilityMode && !isCopilotUrl) {
+        throw new Error(`[smartFetch] Compatibility mode skipped nativeFetch for ${url.substring(0, 60)}`);
+    }
     if (typeof Risu.nativeFetch !== 'function') {
         try {
             return await fetch(url, options);
@@ -426,7 +502,7 @@ export async function smartFetch(url, options = {}) {
     }
     // BUG-2 FIX: nativeFetch를 try-catch로 감싸기 (DataCloneError, bridge 끊김 등 방어)
     try {
-        const nativeRes = await Risu.nativeFetch(url, nfOptions);
+        const nativeRes = await _raceWithAbortSignal(Risu.nativeFetch(url, nfOptions), _localAbortSignal);
         // BUG-S6-7 FIX: 기존 clone→text→reconstruct 패턴 대신 간소화된 검증 사용
         // (기존: 전체 body를 text로 읽어 메모리에 2중 적재. 대형 응답 시 비효율적)
         // 유효한 Response인지 간단히 확인 후 반환.
@@ -438,6 +514,7 @@ export async function smartFetch(url, options = {}) {
         console.log(`[smartFetch] nativeFetch returned invalid response (status=${nativeRes?.status})`);
         throw new Error('nativeFetch returned invalid response');
     } catch (e) {
+        if (e.name === 'AbortError') throw e;
         console.error(`[smartFetch] nativeFetch threw: ${e.message}`);
         throw new Error(`[smartFetch] All fetch strategies failed for ${url.substring(0, 60)}: ${e.message}`);
     }
@@ -460,6 +537,8 @@ export async function smartFetch(url, options = {}) {
  */
 export async function streamingFetch(url, options = {}) {
     const Risu = getRisu();
+    const isCopilotUrl = url.includes('githubcopilot.com') || url.includes('copilot_internal');
+    const compatibilityMode = await isCompatibilityModeEnabled();
 
     // ─── BUG-1 FIX: AbortSignal은 structured-clone 불가 ───
     // bridge 호출(risuFetch/nativeFetch)에서 AbortSignal을 제거.
@@ -491,21 +570,26 @@ export async function streamingFetch(url, options = {}) {
     // ─── BUG-S6-1 FIX: nativeFetch 단일 호출 (Copilot/일반 통합)
     //     기존: Copilot 전용 블록 + 일반 블록에서 동일 nativeFetch 중복 호출
     //     수정: 단일 nativeFetch 호출로 통합
-    if (typeof Risu.nativeFetch === 'function') {
-        try {
-            const nfOptions = { ...options };
-            // Encode body as Uint8Array to prevent bridge serialization corruption
-            if (typeof nfOptions.body === 'string') {
-                nfOptions.body = new TextEncoder().encode(nfOptions.body);
+    if (!compatibilityMode || isCopilotUrl) {
+        if (typeof Risu.nativeFetch === 'function') {
+            try {
+                const nfOptions = { ...options };
+                // Encode body as Uint8Array to prevent bridge serialization corruption
+                if (typeof nfOptions.body === 'string') {
+                    nfOptions.body = new TextEncoder().encode(nfOptions.body);
+                }
+                const res = await _raceWithAbortSignal(Risu.nativeFetch(url, nfOptions), _localAbortSignal);
+                if (res && (res.ok || (res.status && res.status !== 0))) {
+                    console.log(`[streamingFetch] ✓ nativeFetch: status=${res.status} for ${url.substring(0, 60)}`);
+                    return res;
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') throw e;
+                console.log(`[streamingFetch] nativeFetch error: ${e.message}`);
             }
-            const res = await Risu.nativeFetch(url, nfOptions);
-            if (res && (res.ok || (res.status && res.status !== 0))) {
-                console.log(`[streamingFetch] ✓ nativeFetch: status=${res.status} for ${url.substring(0, 60)}`);
-                return res;
-            }
-        } catch (e) {
-            console.log(`[streamingFetch] nativeFetch error: ${e.message}`);
         }
+    } else {
+        console.warn(`[streamingFetch] Compatibility mode active — skipping nativeFetch for ${url.substring(0, 60)}`);
     }
 
     // Strategy 3: risuFetch proxy fallback (body will be fully read — streaming degraded)
@@ -525,13 +609,13 @@ export async function streamingFetch(url, options = {}) {
 
             bodyObj = sanitizeBodyForBridge(bodyObj);
 
-            const result = await Risu.risuFetch(url, {
+            const result = await _raceWithAbortSignal(Risu.risuFetch(url, {
                 method: options.method || 'POST',
                 headers: options.headers || {},
                 body: bodyObj,
                 rawResponse: true,
                 plainFetchDeforce: true,
-            });
+            }), _localAbortSignal);
             if (result && result.data != null) {
                 let responseBody = null;
                 if (result.data instanceof Uint8Array) {
@@ -555,6 +639,7 @@ export async function streamingFetch(url, options = {}) {
                 }
             }
         } catch (e) {
+            if (e.name === 'AbortError') throw e;
             console.log(`[streamingFetch] risuFetch proxy error: ${e.message}`);
         }
     }

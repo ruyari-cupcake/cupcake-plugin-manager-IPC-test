@@ -156,6 +156,12 @@ describe('normalizeCustomModel', () => {
         expect(result.proxyUrl).toBe('https://proxy.io');
     });
 
+    it('normalizes proxyDirect boolean values', () => {
+        expect(normalizeCustomModel({ proxyDirect: 'true' }).proxyDirect).toBe(true);
+        expect(normalizeCustomModel({ proxyDirect: 'false' }).proxyDirect).toBe(false);
+        expect(normalizeCustomModel({ proxyDirect: 1 }).proxyDirect).toBe(true);
+    });
+
     it('excludes key when includeKey=false', () => {
         const result = normalizeCustomModel({ key: 'secret' }, { includeKey: false });
         expect(result.key).toBeUndefined();
@@ -214,12 +220,14 @@ describe('serializeCustomModelExport', () => {
             model: 'claude-3-5-sonnet',
             format: 'anthropic',
             streaming: true,
+            proxyDirect: true,
             thinking: 'medium',
             thinkingBudget: 2048,
         });
         expect(result.model).toBe('claude-3-5-sonnet');
         expect(result.format).toBe('anthropic');
         expect(result.streaming).toBe(true);
+        expect(result.proxyDirect).toBe(true);
         expect(result.thinking).toBe('medium');
         expect(result.thinkingBudget).toBe(2048);
     });
@@ -264,10 +272,11 @@ describe('serializeCustomModelsSetting', () => {
     });
 
     it('normalizes all fields in serialized output', () => {
-        const models = [{ name: 'X', streaming: 'true', thinkingBudget: '512' }];
+        const models = [{ name: 'X', streaming: 'true', thinkingBudget: '512', proxyDirect: 'true' }];
         const result = serializeCustomModelsSetting(models);
         const parsed = JSON.parse(result);
         expect(parsed[0].streaming).toBe(true);
+        expect(parsed[0].proxyDirect).toBe(true);
         expect(parsed[0].thinkingBudget).toBe(512);
         expect(parsed[0].format).toBe('openai'); // default
     });

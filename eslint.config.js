@@ -23,7 +23,12 @@ export default [
             'no-new-func': 'error',
 
             // 코드 품질
-            'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+            'no-unused-vars': ['warn', {
+                argsIgnorePattern: '^_',
+                varsIgnorePattern: '^_',
+                caughtErrorsIgnorePattern: '^_',
+                ignoreRestSiblings: true,
+            }],
             'no-constant-condition': ['warn', { checkLoops: false }],
             'no-empty': ['warn', { allowEmptyCatch: true }],
             'prefer-const': 'warn',

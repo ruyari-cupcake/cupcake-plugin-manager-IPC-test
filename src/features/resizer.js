@@ -9,7 +9,8 @@
  *   - querySelectorAll → 순회 querySelector (SafeElement[] 직렬화 불가)
  *   - e.target → getBoundingClientRect() 히트 테스트로 대체
  */
-const Risu = window.risuai || window.Risuai;
+export {};
+const Risu = /** @type {any} */ (window.risuai || window.Risuai);
 const LOG = '[CPM Resizer]';
 
 let rootDoc = null;

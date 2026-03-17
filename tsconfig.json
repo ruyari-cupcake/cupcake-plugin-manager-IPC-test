@@ -16,6 +16,6 @@
             "./src/*": ["./src/*"]
         }
     },
-    "include": ["src/shared/**/*.js", "src/shared/**/*.d.ts"],
-    "exclude": ["node_modules", "dist", "tests"]
+    "include": ["src/**/*.js", "src/**/*.d.ts"],
+    "exclude": ["node_modules", "dist", "tests", "src/shared/tailwind-css.generated.js"]
 }

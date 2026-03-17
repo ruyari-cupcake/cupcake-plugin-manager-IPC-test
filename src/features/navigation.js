@@ -11,7 +11,8 @@
  *   - classList/getAttribute 제한 → matches() 또는 x-prefix 속성만 사용
  *   - getChildren().length 만 안전 (개별 아이템은 프록시 아님)
  */
-const Risu = window.risuai || window.Risuai;
+export {};
+const Risu = /** @type {any} */ (window.risuai || window.Risuai);
 const LOG = '[CPM Nav]';
 
 const WIDGET_ATTR_KEY = 'x-cpmnavi-widget';

@@ -24,7 +24,7 @@ function _resolveEnv() {
         // @ts-ignore — process.env exists only in Node (build-time)
         const env = (typeof process !== 'undefined' && process.env?.CPM_ENV) || '';
         if (env === 'production') return 'production';
-    } catch (_) { /* iframe runtime — no process */ }
+    } catch { /* iframe runtime — no process */ }
     return 'test';
 }
 

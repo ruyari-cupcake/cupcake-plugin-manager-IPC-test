@@ -3,13 +3,14 @@
  * 독립 V3 플러그인 (IPC 불필요)
  * GitHub Copilot OAuth Device Flow 토큰 관리
  */
-const Risu = window.risuai || window.Risuai;
+export {};
+const Risu = /** @type {any} */ (window.risuai || window.Risuai);
 const LOG = '[CPM Copilot]';
 const PREFIX = 'cpm-copilot';
 const TOKEN_ARG_KEY = 'tools_githubCopilotToken';
 const GITHUB_CLIENT_ID = '01ab8ac9400c4e429b23';
-const CODE_VERSION = '1.109.2';
-const CHAT_VERSION = '0.37.4';
+const CODE_VERSION = '1.111.0';
+const CHAT_VERSION = '0.40.2026031401';
 const USER_AGENT = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/${CODE_VERSION} Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36`;
 
 /* ── Helpers ── */
@@ -241,16 +242,17 @@ async function doGenerate() {
             </div>`;
         document.body.appendChild(overlay);
 
-        overlay.querySelector('#dc-close').onclick = () => overlay.remove();
-        overlay.querySelector('#dc-cancel').onclick = () => overlay.remove();
-        overlay.querySelector('#dc-copy').onclick = () => { try { navigator.clipboard.writeText(dc.user_code); } catch {} };
-        overlay.querySelector('#dc-confirm').onclick = async function () {
-            this.disabled = true; this.textContent = '확인 중...';
+        /** @type {HTMLElement} */ (overlay.querySelector('#dc-close')).onclick = () => overlay.remove();
+        /** @type {HTMLElement} */ (overlay.querySelector('#dc-cancel')).onclick = () => overlay.remove();
+        /** @type {HTMLElement} */ (overlay.querySelector('#dc-copy')).onclick = () => { try { navigator.clipboard.writeText(dc.user_code); } catch {} };
+        const confirmBtn = /** @type {HTMLButtonElement} */ (overlay.querySelector('#dc-confirm'));
+        confirmBtn.onclick = async function () {
+            confirmBtn.disabled = true; confirmBtn.textContent = '확인 중...';
             try {
                 const at = await exchangeAccessToken(dc.device_code);
                 setToken(at); overlay.remove(); await refreshTokenDisplay();
                 showSuccess('<strong>✅ 성공!</strong> 토큰이 생성 및 저장되었습니다.');
-            } catch (e) { this.disabled = false; this.textContent = '확인'; alert(e.message); }
+            } catch (e) { confirmBtn.disabled = false; confirmBtn.textContent = '확인'; alert(e.message); }
         };
     } catch (e) { showError(e.message); }
 }
@@ -363,7 +365,7 @@ async function doQuota() {
 }
 
 async function doManualSave() {
-    const inp = document.getElementById(`${PREFIX}-manual-input`);
+    const inp = /** @type {HTMLInputElement} */ (document.getElementById(`${PREFIX}-manual-input`));
     if (!inp || !inp.value.trim()) { alert('토큰을 입력하세요.'); return; }
     setToken(inp.value.trim()); inp.value = '';
     await refreshTokenDisplay();
@@ -381,7 +383,7 @@ async function doCopyToken() {
 }
 
 /* ── Open UI ── */
-async function openUI() {
+async function _openUI() {
     Risu.showContainer('fullscreen');
     const token = await getToken();
     const masked = token ? (token.length > 16 ? token.substring(0, 8) + '••••••••' + token.substring(token.length - 4) : token) : '토큰 없음';

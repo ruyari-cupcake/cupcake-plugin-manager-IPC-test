@@ -75,7 +75,7 @@ export interface SchemaDefinition {
 /** 프로바이더 공통 응답 */
 export interface ProviderResult {
     success: boolean;
-    content: string;
+    content: string | ReadableStream<string>;
     _status?: number;
 }
 
@@ -145,6 +145,10 @@ export interface GeminiFormatResult {
 export interface GeminiFormatConfig {
     preserveSystem?: boolean;
     useThoughtSignature?: boolean;
+    sysfirst?: boolean;
+    altrole?: boolean;
+    mustuser?: boolean;
+    mergesys?: boolean;
 }
 
 export interface GeminiGenerationConfig {
@@ -227,6 +231,9 @@ declare global {
     interface Window {
         risuai?: RisuAPI;
         Risuai?: RisuAPI;
+        _cpmNaviCleanup?: () => void;
+        _cpmResizerCleanup?: () => void;
+        _cpmTransCacheCleanup?: () => void;
     }
 }
 
@@ -240,8 +247,30 @@ export interface RisuAPI {
     getRootDocument?(): Promise<any>;
     addPluginChannelListener(channel: string, callback: (msg: IPCMessage) => void): void;
     postPluginChannelMessage(target: string, channel: string, message: IPCMessage): void;
-    risuFetch?(url: string, options: Record<string, unknown>): Promise<unknown>;
+    risuFetch?(url: string, options: Record<string, unknown>): Promise<RisuFetchResult>;
+    nativeFetch(url: string, options?: Record<string, unknown>): Promise<Response>;
+    showContainer(mode: string): void;
+    hideContainer(): void;
+    registerSetting(name: string, callback: () => void | Promise<void>, icon?: string, type?: string): Promise<void>;
+    addProvider(name: string, handler: (args: any, abortSignal?: AbortSignal) => Promise<ProviderResult>, options?: Record<string, unknown>): Promise<void>;
+    createMutationObserver?(callback: MutationCallback): MutationObserver;
+    pluginStorage: PluginStorage;
+    setDatabaseLite(patch: Record<string, unknown>): Promise<void>;
     [key: string]: unknown;
+}
+
+export interface RisuFetchResult {
+    ok: boolean;
+    data: any;
+    status?: number;
+    headers?: Record<string, string>;
+}
+
+export interface PluginStorage {
+    getItem(key: string): Promise<string | null>;
+    setItem(key: string, value: string): Promise<void>;
+    removeItem(key: string): Promise<void>;
+    keys(): Promise<string[]>;
 }
 
 // ══════════════════════════════════════════════

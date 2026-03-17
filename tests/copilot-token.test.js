@@ -81,6 +81,7 @@ describe('Copilot Token', () => {
         const p3 = ensureCopilotApiToken();
 
         await Promise.resolve();
+        await Promise.resolve();
         expect(mockFetch).toHaveBeenCalledOnce();
 
         resolveFetch();
@@ -161,6 +162,31 @@ describe('Copilot Token', () => {
 
         await ensureCopilotApiToken();
         expect(getCopilotApiBase()).toBe('https://custom.copilot.test');
+    });
+
+    it('uses reduced token-exchange headers in nodeless mode', async () => {
+        setCopilotGetArgFn(async (key) => {
+            if (key === 'tools_githubCopilotToken') return 'ghp_testtoken';
+            if (key === 'cpm_copilot_nodeless_mode') return 'nodeless-1';
+            return '';
+        });
+        const mockFetch = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                token: 'nodeless-token',
+                expires_at: Math.floor(Date.now() / 1000) + 3600,
+            }),
+        });
+        setCopilotFetchFn(mockFetch);
+
+        await ensureCopilotApiToken();
+
+        const headers = mockFetch.mock.calls[0][1].headers;
+        expect(headers.Authorization).toBe('Bearer ghp_testtoken');
+        expect(headers.Accept).toBe('application/json');
+        expect(headers['Editor-Version']).toBeUndefined();
+        expect(headers['Editor-Plugin-Version']).toBeUndefined();
+        expect(headers['X-GitHub-Api-Version']).toBeUndefined();
     });
 
     // SEC-4: data.data model list fallback

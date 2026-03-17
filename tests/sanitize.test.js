@@ -40,8 +40,12 @@ describe('stripStaleAutoCaption', () => {
         expect(stripStaleAutoCaption('See the image [a nice photo]', msg)).toBe('See the image [a nice photo]');
     });
 
-    it('이미지 키워드 + 브래킷 캡션 제거', () => {
-        expect(stripStaleAutoCaption('Check this image [a beautiful sunset]', {})).toBe('Check this image');
+    it('이미지 키워드 + 브래킷 캡션 제거 (3+ 단어)', () => {
+        expect(stripStaleAutoCaption('Check this image [a beautiful scenic sunset]', {})).toBe('Check this image');
+    });
+
+    it('이미지 키워드 + 2단어 브래킷 → 유지 (구조적 참조)', () => {
+        expect(stripStaleAutoCaption('Check this image [a beautiful sunset]', {})).toBe('Check this image [a beautiful sunset]');
     });
 
     it('이미지 키워드 없으면 변경 없음', () => {

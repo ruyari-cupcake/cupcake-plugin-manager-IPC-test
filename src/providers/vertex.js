@@ -2,14 +2,21 @@
  * CPM Provider — Vertex AI (Gemini + Claude on Vertex)
  * OAuth JWT flow with per-credential token caching
  */
-import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager } from '../shared/ipc-protocol.js';
+import { MANAGER_NAME, CH, MSG, getRisu, registerWithManager, setupChannelCleanup } from '../shared/ipc-protocol.js';
 import { KeyPool } from '../shared/key-pool.js';
 import { sanitizeBodyJSON } from '../shared/sanitize.js';
 import { formatToGemini, formatToAnthropic } from '../shared/message-format.js';
 import { getGeminiSafetySettings, buildGeminiThinkingConfig, validateGeminiParams, cleanExperimentalModelParams } from '../shared/gemini-helpers.js';
-import { parseGeminiNonStreamingResponse, parseClaudeNonStreamingResponse } from '../shared/sse-parser.js';
+import { createSSEStream, parseGeminiSSELine, createAnthropicSSEStream, parseGeminiNonStreamingResponse, parseClaudeNonStreamingResponse } from '../shared/sse-parser.js';
 import { formatVertexGoogleModels, formatVertexClaudeModels } from '../shared/dynamic-models.js';
-import { smartFetch, safeStringify } from '../shared/helpers.js';
+import { smartFetch, streamingFetch, safeStringify, shouldEnableStreaming } from '../shared/helpers.js';
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function parseRetryAfterMs(headers) {
+    const v = headers?.get?.('retry-after'); if (!v) return 0;
+    const n = Number(v); return Number.isFinite(n) ? n * 1000 : 0;
+}
+function isRetriableStatus(s) { return s === 408 || s === 429 || s === 503 || s === 529 || (s >= 500 && s < 600); }
 
 const PLUGIN_NAME = 'CPM Provider - Vertex AI';
 const Risu = getRisu();
@@ -159,19 +166,60 @@ async function fetchDynamicVertexModels(settings = {}) {
     return results;
 }
 
-async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, abortSignal) {
+async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, abortSignal, requestId) {
     if (abortSignal?.aborted) return { success: true, content: '' };
 
     const pool = KeyPool.fromJson(settings.cpm_vertex_key_json);
     if (pool.remaining === 0) return { success: false, content: '[VertexAI] GCP JSON key not configured' };
 
-    // FEAT-1: Model override
     const actualModelId = (settings.cpm_vertex_model || '').trim() || modelDef.id;
     const isClaude = actualModelId.includes('claude');
     const location = settings.cpm_vertex_location || 'us-central1';
     const baseUrl = location === 'global'
         ? 'https://aiplatform.googleapis.com'
         : `https://${location}-aiplatform.googleapis.com`;
+    const streamingEnabled = shouldEnableStreaming(settings);
+
+    // HTTP retry wrapper
+    const executeRequest = async (fetchFn, label, maxAttempts = 3) => {
+        let attempt = 0;
+        let response;
+        while (attempt < maxAttempts) {
+            response = await fetchFn();
+            if (response?.ok) return response;
+            const status = response?.status || 0;
+            if (!isRetriableStatus(status) || attempt >= maxAttempts - 1 || abortSignal?.aborted) return response;
+            response?.body?.cancel?.();
+            attempt++;
+            const retryDelay = parseRetryAfterMs(response?.headers) || (700 * attempt);
+            console.warn(`[CPM-Vertex] ${label} retry ${attempt}/${maxAttempts - 1} after HTTP ${status}`);
+            await sleep(retryDelay);
+        }
+        return response;
+    };
+
+    // Helper: IPC streaming read loop
+    const streamViaIpc = async (sseStream) => {
+        const reader = sseStream.getReader();
+        let accumulated = '';
+        try {
+            while (true) {
+                if (abortSignal?.aborted) break;
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) {
+                    accumulated += value;
+                    Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, {
+                        type: MSG.STREAM_CHUNK, requestId, chunk: value
+                    });
+                }
+            }
+        } catch (e) {
+            if (e.name !== 'AbortError') console.error('[CPM-Vertex] Stream error:', e.message);
+        }
+        Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.STREAM_END, requestId });
+        return accumulated;
+    };
 
     return pool.withRotation(async (credJson) => {
         const { token, projectId } = await getVertexAccessToken(credJson);
@@ -186,7 +234,7 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             if (Number.isFinite(maxTokens) && clampedMaxTokens !== maxTokens) {
                 console.warn(`[Vertex] max_tokens ${maxTokens} → clamped to 128000 for Claude (API limit)`);
             }
-            const body = { model: claudeModelId, messages: chatMessages, max_tokens: clampedMaxTokens || 4096, anthropic_version: 'vertex-2023-10-16' };
+            const body = { model: claudeModelId, messages: chatMessages, max_tokens: clampedMaxTokens || 4096, anthropic_version: 'vertex-2023-10-16', stream: streamingEnabled };
             if (temp !== undefined && temp !== null) body.temperature = temp;
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
@@ -197,7 +245,6 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             const isClaudeAdaptive = claudeModelId.includes('claude-sonnet-4-6') || claudeModelId.includes('claude-opus-4-6');
 
             if (claudeEffort && isClaudeAdaptive) {
-                // Claude 4.6 adaptive thinking on Vertex
                 body.thinking = { type: 'adaptive' };
                 const effort = ['low', 'medium', 'high', 'max'].includes(claudeEffort) ? claudeEffort : 'high';
                 body.output_config = { effort };
@@ -205,7 +252,6 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
                 body.thinking = { type: 'enabled', budget_tokens: thinkBudget };
             }
             if (body.thinking) {
-                // Anthropic API rejects temperature/top_k/top_p when thinking is enabled
                 delete body.temperature;
                 delete body.top_k;
                 delete body.top_p;
@@ -216,18 +262,53 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
                 }
             }
 
-            // Beta headers for output-128k
             const betaParts = [];
             if (body.thinking) betaParts.push('interleaved-thinking-2025-05-14');
             if (body.max_tokens > 8192) betaParts.push('output-128k-2025-02-19');
             if (betaParts.length > 0) headers['anthropic-beta'] = betaParts.join(',');
 
+            const showThinking = settings.chat_vertex_showThoughtsToken === true || settings.chat_vertex_showThoughtsToken === 'true';
             const publisher = 'anthropic';
             const url = `${baseUrl}/v1/projects/${projectId}/locations/${location}/publishers/${publisher}/models/${actualModelId}:rawPredict`;
-            const res = await smartFetch(url, { method: 'POST', headers, body: sanitizeBodyJSON(safeStringify(body)), signal: abortSignal });
+            const safeBody = sanitizeBodyJSON(safeStringify(body));
+
+            if (streamingEnabled) {
+                const res = await executeRequest(
+                    () => streamingFetch(url, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                    'claude-stream'
+                );
+                if (!res.ok) {
+                    const status = res.status;
+                    if (status === 401 || status === 403) {
+                        const cacheKey = (typeof credJson === 'string' ? JSON.parse(credJson) : credJson)?.project_id || '';
+                        _tokenCaches.delete(cacheKey);
+                    }
+                    return { success: false, content: `[Vertex Claude Error ${status}] ${await res.text()}`, _status: status };
+                }
+                const hasBody = !!(res.body && typeof res.body.getReader === 'function');
+                if (!hasBody) {
+                    const fallbackBody = { ...body, stream: false };
+                    const fallbackRes = await executeRequest(
+                        () => smartFetch(url, { method: 'POST', headers, body: safeStringify(fallbackBody), signal: abortSignal }),
+                        'claude-non-stream fallback'
+                    );
+                    if (!fallbackRes.ok) return { success: false, content: `[Vertex Claude Error ${fallbackRes.status}] ${await fallbackRes.text()}`, _status: fallbackRes.status };
+                    const fallbackData = await fallbackRes.json();
+                    return parseClaudeNonStreamingResponse(fallbackData, { showThinking });
+                }
+                const sseStream = createAnthropicSSEStream(res, abortSignal, { showThinking, _requestId: requestId });
+                const accumulated = await streamViaIpc(sseStream);
+                return { success: true, content: accumulated, _streamed: true };
+            }
+
+            // Non-streaming Claude-on-Vertex
+            body.stream = false;
+            const res = await executeRequest(
+                () => smartFetch(url, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                'claude-request'
+            );
             if (!res.ok) {
                 const status = res.status;
-                // Invalidate token cache on auth failures
                 if (status === 401 || status === 403) {
                     const cacheKey = (typeof credJson === 'string' ? JSON.parse(credJson) : credJson)?.project_id || '';
                     _tokenCaches.delete(cacheKey);
@@ -236,7 +317,6 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             }
             const data = await res.json();
             if (!data) return { success: false, content: `[VertexAI Claude] Empty response (HTTP ${res?.status || '?'})`, _status: res?.status };
-            const showThinking = settings.chat_vertex_showThoughtsToken === true || settings.chat_vertex_showThoughtsToken === 'true';
             return parseClaudeNonStreamingResponse(data, { showThinking });
         } else {
             // Gemini-on-Vertex
@@ -269,8 +349,6 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             validateGeminiParams(gc.generationConfig);
             cleanExperimentalModelParams(gc.generationConfig, actualModelId);
 
-            // Strip thought:true from historical parts for thinking models
-            // (Vertex AI may reject requests with thought:true in historical parts)
             const isThinkingModel = actualModelId && (/gemini-2\.5|gemini-3/i.test(actualModelId));
             if (isThinkingModel && gc.contents) {
                 gc.contents = gc.contents.map(content => ({
@@ -283,18 +361,74 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             }
 
             const publisher = 'google';
+            const safeBody = sanitizeBodyJSON(safeStringify(gc));
+
+            if (streamingEnabled) {
+                const streamUrl = `${baseUrl}/v1/projects/${projectId}/locations/${location}/publishers/${publisher}/models/${actualModelId}:streamGenerateContent?alt=sse`;
+                const res = await executeRequest(
+                    () => streamingFetch(streamUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                    'gemini-stream'
+                );
+                if (!res.ok) {
+                    const status = res.status;
+                    if (status === 401 || status === 403) {
+                        const cacheKey = (typeof credJson === 'string' ? JSON.parse(credJson) : credJson)?.project_id || '';
+                        _tokenCaches.delete(cacheKey);
+                    }
+                    // Region fallback for streaming
+                    if (status === 404 || status === 400) {
+                        const fallbackRegions = ['us-central1', 'us-east4', 'europe-west1', 'asia-northeast1'].filter(r => r !== location);
+                        for (const altRegion of fallbackRegions) {
+                            try {
+                                const altBaseUrl = altRegion === 'global'
+                                    ? 'https://aiplatform.googleapis.com'
+                                    : `https://${altRegion}-aiplatform.googleapis.com`;
+                                const altStreamUrl = `${altBaseUrl}/v1/projects/${projectId}/locations/${altRegion}/publishers/${publisher}/models/${actualModelId}:streamGenerateContent?alt=sse`;
+                                console.log(`[Vertex] Retrying streaming with region: ${altRegion}`);
+                                const altRes = await streamingFetch(altStreamUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal });
+                                if (altRes.ok && altRes.body && typeof altRes.body.getReader === 'function') {
+                                    const config = { showThoughtsToken: showThoughts, useThoughtSignature: useSignature, _requestId: requestId };
+                                    const sseStream = createSSEStream(altRes, (line) => parseGeminiSSELine(line, config), abortSignal);
+                                    const accumulated = await streamViaIpc(sseStream);
+                                    return { success: true, content: accumulated, _streamed: true };
+                                }
+                            } catch { /* continue to next region */ }
+                        }
+                    }
+                    return { success: false, content: `[Vertex Gemini Error ${status}] ${await res.text()}`, _status: status };
+                }
+                const hasBody = !!(res.body && typeof res.body.getReader === 'function');
+                if (!hasBody) {
+                    // Fallback to non-streaming
+                    const nonStreamUrl = `${baseUrl}/v1/projects/${projectId}/locations/${location}/publishers/${publisher}/models/${actualModelId}:generateContent`;
+                    const fallbackRes = await executeRequest(
+                        () => smartFetch(nonStreamUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                        'gemini-non-stream fallback'
+                    );
+                    if (!fallbackRes.ok) return { success: false, content: `[Vertex Gemini Error ${fallbackRes.status}] ${await fallbackRes.text()}`, _status: fallbackRes.status };
+                    const fallbackData = await fallbackRes.json();
+                    return parseGeminiNonStreamingResponse(fallbackData, { showThoughtsToken: showThoughts, useThoughtSignature: useSignature });
+                }
+                const config = { showThoughtsToken: showThoughts, useThoughtSignature: useSignature, _requestId: requestId };
+                const sseStream = createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal);
+                const accumulated = await streamViaIpc(sseStream);
+                return { success: true, content: accumulated, _streamed: true };
+            }
+
+            // Non-streaming Gemini
             const url = `${baseUrl}/v1/projects/${projectId}/locations/${location}/publishers/${publisher}/models/${actualModelId}:generateContent`;
-            const res = await smartFetch(url, { method: 'POST', headers, body: sanitizeBodyJSON(safeStringify(gc)), signal: abortSignal });
+            const res = await executeRequest(
+                () => smartFetch(url, { method: 'POST', headers, body: safeBody, signal: abortSignal }),
+                'gemini-request'
+            );
             if (!res.ok) {
                 const errText = await res.text();
                 const status = res.status;
-                // Invalidate token cache on auth failures
                 if (status === 401 || status === 403) {
                     const cacheKey = (typeof credJson === 'string' ? JSON.parse(credJson) : credJson)?.project_id || '';
                     _tokenCaches.delete(cacheKey);
                 }
                 if (status === 404 || status === 400) {
-                    // STB-1: Vertex region fallback retry — try alternate regions automatically
                     const fallbackRegions = ['us-central1', 'us-east4', 'europe-west1', 'asia-northeast1'].filter(r => r !== location);
                     for (const altRegion of fallbackRegions) {
                         try {
@@ -303,7 +437,7 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
                                 : `https://${altRegion}-aiplatform.googleapis.com`;
                             const altUrl = `${altBaseUrl}/v1/projects/${projectId}/locations/${altRegion}/publishers/${publisher}/models/${actualModelId}:generateContent`;
                             console.log(`[Vertex] Retrying with region: ${altRegion}`);
-                            const altRes = await smartFetch(altUrl, { method: 'POST', headers, body: sanitizeBodyJSON(safeStringify(gc)), signal: abortSignal });
+                            const altRes = await smartFetch(altUrl, { method: 'POST', headers, body: safeBody, signal: abortSignal });
                             if (altRes.ok) {
                                 const altData = await altRes.json();
                                 if (altData) return parseGeminiNonStreamingResponse(altData, { showThoughtsToken: showThoughts, useThoughtSignature: useSignature });
@@ -361,7 +495,7 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             const ac = new AbortController();
             _pendingAbortControllers.set(requestId, ac);
             try {
-                const result = await fetchVertex(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal);
+                const result = await fetchVertex(modelDef, messages, temperature, maxTokens, args || {}, settings || {}, ac.signal, requestId);
                 Risu.postPluginChannelMessage(MANAGER_NAME, CH.RESPONSE, { type: MSG.RESPONSE, requestId, data: result });
             } catch (e) {
                 if (ac.signal.aborted) {
@@ -374,6 +508,7 @@ async function fetchVertex(modelDef, messages, temp, maxTokens, args, settings, 
             }
         });
         const ok = await registerWithManager(Risu, PLUGIN_NAME, { name: 'VertexAI', models, settingsFields, supportsDynamicModels: true }, { onControlMessage: handleControlMessage });
+        setupChannelCleanup(Risu, [CH.ABORT, CH.FETCH]);
         console.log(`[CPM-Vertex] Provider initialized (registered: ${ok})`);
     } catch (e) { console.error('[CPM-Vertex] Init failed:', e); }
 })();
