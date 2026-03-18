@@ -119,7 +119,7 @@ export function parseOpenAISSELine(line, config = {}) {
         // C-12 FIX: delta.reasoning_content ?? delta.reasoning (OpenRouter/DeepSeek 호환)
         const reasoningContent = delta.reasoning_content ?? delta.reasoning;
         if (config.showThinking && reasoningContent) {
-            if (!config._inThinking) { config._inThinking = true; text += '<Thoughts>\n\n'; }
+            if (!config._inThinking) { config._inThinking = true; text += '<Thoughts>\n'; }
             text += reasoningContent;
         }
         if (delta.content) {
@@ -251,7 +251,7 @@ export function createAnthropicSSEStream(response, abortSignal, config = {}) {
                                     if (obj.delta?.type === 'thinking' || obj.delta?.type === 'thinking_delta') {
                                         _hasThinking = true;
                                         if (config.showThinking && obj.delta.thinking) {
-                                            if (!thinking) { thinking = true; dt += '<Thoughts>\n\n'; }
+                                            if (!thinking) { thinking = true; dt += '<Thoughts>\n'; }
                                             dt += obj.delta.thinking;
                                         }
                                     } else if (obj.delta?.type === 'redacted_thinking') {
@@ -327,7 +327,7 @@ export function parseGeminiSSELine(line, config = {}) {
             for (const part of obj.candidates[0].content.parts) {
                 if (part.thought) {
                     if (config.showThoughtsToken && part.text) {
-                        if (!config._inThoughtBlock) { config._inThoughtBlock = true; text += '<Thoughts>\n\n'; }
+                        if (!config._inThoughtBlock) { config._inThoughtBlock = true; text += '<Thoughts>\n'; }
                         text += part.text;
                     }
                 } else if (part.text !== undefined) {
@@ -362,7 +362,7 @@ export function parseGeminiNonStreamingResponse(data, config = {}) {
     let result = '', contentOnly = '', inThought = false, extractedSig = null;
     if (data.candidates?.[0]?.content?.parts) {
         for (const part of data.candidates[0].content.parts) {
-            if (part.thought) { if (config.showThoughtsToken && part.text) { if (!inThought) { inThought = true; result += '<Thoughts>\n\n'; } result += part.text; } }
+            if (part.thought) { if (config.showThoughtsToken && part.text) { if (!inThought) { inThought = true; result += '<Thoughts>\n'; } result += part.text; } }
             else if (part.text !== undefined) { if (inThought) { inThought = false; result += '\n</Thoughts>\n\n'; } result += part.text; contentOnly += part.text; }
             if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) extractedSig = part.thought_signature || part.thoughtSignature;
         }
@@ -390,8 +390,8 @@ export function parseClaudeNonStreamingResponse(data, config = {}) {
     let result = '', inThinking = false, hasThinking = false, visibleText = '';
     if (Array.isArray(data.content)) {
         for (const block of data.content) {
-            if (block.type === 'thinking') { hasThinking = true; if (config.showThinking && block.thinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; } result += block.thinking; } }
-            else if (block.type === 'redacted_thinking') { hasThinking = true; if (config.showThinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; } result += '\n{{redacted_thinking}}\n'; } }
+            if (block.type === 'thinking') { hasThinking = true; if (config.showThinking && block.thinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n'; } result += block.thinking; } }
+            else if (block.type === 'redacted_thinking') { hasThinking = true; if (config.showThinking) { if (!inThinking) { inThinking = true; result += '<Thoughts>\n'; } result += '\n{{redacted_thinking}}\n'; } }
             else if (block.type === 'text') { if (inThinking) { inThinking = false; result += '\n</Thoughts>\n\n'; } const t = block.text || ''; result += t; visibleText += t; }
         }
     }
@@ -431,7 +431,7 @@ export function createResponsesAPISSEStream(response, abortSignal, config = {}) 
                     text += obj.delta;
                 } else if (obj.type === 'response.reasoning_summary_text.delta' && obj.delta) {
                     if (config.showThinking) {
-                        if (!inReasoning) { inReasoning = true; text += '<Thoughts>\n\n'; }
+                        if (!inReasoning) { inReasoning = true; text += '<Thoughts>\n'; }
                         text += obj.delta;
                     }
                 } else if (obj.type === 'response.completed' && obj.response?.usage) {
@@ -499,12 +499,12 @@ export function parseOpenAINonStreamingResponse(data, config = {}) {
     if (config.showThinking) {
         const reasoning = msg.reasoning_content || msg.reasoning;
         if (reasoning) {
-            result += '<Thoughts>\n\n' + reasoning + '\n</Thoughts>\n\n';
+            result += '<Thoughts>\n' + reasoning + '\n</Thoughts>\n\n';
         } else if (typeof msg.content === 'string' && msg.content.includes('<think>')) {
             // DeepSeek <think> block extraction
             const thinkMatch = msg.content.match(/<think>([\s\S]*?)<\/think>/);
             if (thinkMatch) {
-                result += '<Thoughts>\n\n' + thinkMatch[1].trim() + '\n</Thoughts>\n\n';
+                result += '<Thoughts>\n' + thinkMatch[1].trim() + '\n</Thoughts>\n\n';
                 const afterThink = msg.content.replace(/<think>[\s\S]*?<\/think>\s*/, '');
                 return { success: true, content: result + afterThink };
             }
@@ -542,7 +542,7 @@ export function parseResponsesAPINonStreamingResponse(data, config = {}) {
                 for (const s of item.summary) {
                     if (s.type === 'summary_text' && s.text) reasoning += s.text;
                 }
-                if (reasoning) result = '<Thoughts>\n\n' + reasoning + '\n</Thoughts>\n\n' + result;
+                if (reasoning) result = '<Thoughts>\n' + reasoning + '\n</Thoughts>\n\n' + result;
             }
         }
     }
