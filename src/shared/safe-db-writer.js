@@ -50,11 +50,14 @@ function validatePlugin(plugin, index) {
     if (plugin.name.length > 200) {
         return { valid: false, reason: `plugins[${index}].name: exceeds 200 chars` };
     }
-    // updateURL이 있으면 https만 허용
+    // updateURL이 있으면 https만 허용 + 길이 제한
     if (plugin.updateURL && typeof plugin.updateURL === 'string' && plugin.updateURL.trim() !== '') {
         const url = plugin.updateURL.trim();
         if (!url.startsWith('https://')) {
             return { valid: false, reason: `plugins[${index}].updateURL: only https:// allowed, got '${url.slice(0, 50)}'` };
+        }
+        if (url.length > 2048) {
+            return { valid: false, reason: `plugins[${index}].updateURL: exceeds 2048 chars (${url.length})` };
         }
     }
     return { valid: true };

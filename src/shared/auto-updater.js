@@ -131,6 +131,7 @@ export function isRetriableError(error) {
  * @property {{ showMainAutoUpdateResult?: (local: string, remote: string, changes: string, success: boolean, error?: string) => Promise<void> }} [toast] - Toast notifications
  * @property {(data: any, schema: any) => { valid: boolean, value: any }} [validateSchema] - Schema validator
  * @property {string} [autoUpdateArgKey] - Plugin arg key for auto-update toggle (default: 'cpm_auto_update_enabled')
+ * @property {number} [_autoSaveDelayMs] - Autosave wait delay in ms (default: 3500, 0 for tests)
  */
 
 /**
@@ -149,6 +150,8 @@ export function createAutoUpdater(deps) {
         validateSchema,
         autoUpdateArgKey = 'cpm_auto_update_enabled',
     } = deps;
+
+    const _autoSaveDelayMs = typeof deps._autoSaveDelayMs === 'number' ? deps._autoSaveDelayMs : 3500;
 
     // ── Constants ──
     const VERSION_CHECK_COOLDOWN = 600000; // 10 minutes
@@ -602,8 +605,10 @@ export function createAutoUpdater(deps) {
             }
 
             // Wait for autosave
-            console.log(`${LOG} Waiting for RisuAI autosave flush before showing success...`);
-            await new Promise(resolve => setTimeout(resolve, 3500));
+            if (_autoSaveDelayMs > 0) {
+                console.log(`${LOG} Waiting for RisuAI autosave flush before showing success...`);
+                await new Promise(resolve => setTimeout(resolve, _autoSaveDelayMs));
+            }
 
             console.log(`${LOG} ✓ Successfully applied main plugin update: ${currentInstalledVersion} → ${parsedVersion}`);
             console.log(`${LOG}   Settings preserved: ${Object.keys(mergedRealArg).length} args (${Object.keys(oldRealArg).length} existed, ${Object.keys(parsedArgs).length} in new version)`);
@@ -807,6 +812,33 @@ export function createAutoUpdater(deps) {
                 try { await rememberPendingUpdate(mainUpdateInfo.remoteVersion, mainUpdateInfo.changes); } catch (e) { console.warn('[CPM AutoCheck] rememberPendingUpdate failed:', e); }
                 try { await safeMainPluginUpdate(mainUpdateInfo.remoteVersion, mainUpdateInfo.changes); } catch (e) { console.warn('[CPM AutoCheck] safeMainPluginUpdate failed:', e); }
             }
+
+            // ── Sub-plugin version check ──
+            try {
+                const subUpdates = await _checkSubPluginVersions(manifest);
+                if (subUpdates.length > 0) {
+                    console.log(`[CPM AutoCheck] ${subUpdates.length} sub-plugin update(s) available:`);
+                    for (const u of subUpdates) {
+                        console.log(`  - ${u.name}: ${u.localVersion}→${u.remoteVersion}`);
+                    }
+                    _lastSubPluginUpdates = subUpdates;
+
+                    // Filter by per-sub-plugin toggle (default ON)
+                    const enabledUpdates = [];
+                    for (const u of subUpdates) {
+                        if (await isSubPluginAutoUpdateEnabled(u.name)) {
+                            enabledUpdates.push(u);
+                        } else {
+                            console.log(`[CPM AutoCheck] Sub-plugin "${u.name}" auto-update disabled by user, skipping.`);
+                        }
+                    }
+                    if (enabledUpdates.length > 0) {
+                        await runSequentialSubPluginUpdates(enabledUpdates);
+                    }
+                }
+            } catch (/** @type {any} */ subErr) {
+                console.debug('[CPM AutoCheck] Sub-plugin check failed:', subErr.message || subErr);
+            }
         } catch (/** @type {any} */ e) {
             console.debug(`[CPM AutoCheck] Silent error:`, e.message || e);
         }
@@ -903,6 +935,380 @@ export function createAutoUpdater(deps) {
         } catch (/** @type {any} */ e) { console.debug('[CPM MainAutoCheck] Silent error:', e.message || e); }
     }
 
+    // ── Sub-plugin auto-update infrastructure ──
+
+    /** @type {Array<{name: string, localVersion: string, remoteVersion: string, file?: string, sha256?: string, changes?: string}>} */
+    let _lastSubPluginUpdates = [];
+
+    /** @type {Promise<void>|null} */
+    let _subUpdateQueueInFlight = null;
+
+    /**
+     * Check installed sub-plugins against the version manifest.
+     * @param {Record<string, any>} manifest - Parsed version manifest
+     * @returns {Promise<Array<{name: string, localVersion: string, remoteVersion: string, file?: string, sha256?: string, changes?: string}>>}
+     */
+    async function _checkSubPluginVersions(manifest) {
+        const updates = [];
+        try {
+            const db = await Risu.getDatabase();
+            if (!db?.plugins || !Array.isArray(db.plugins)) return updates;
+
+            for (const [remoteName, remoteMeta] of Object.entries(manifest)) {
+                if (!remoteMeta || typeof remoteMeta !== 'object' || !remoteMeta.version) continue;
+                // Skip the main plugin (already handled above)
+                if (remoteName === pluginName || remoteName === DB_PLUGIN_NAME) continue;
+
+                const installed = db.plugins.find(
+                    (/** @type {any} */ p) => p.name === remoteName || p.name === remoteName.replace(/\s+/g, '_')
+                );
+                if (!installed) continue; // Not installed — skip
+
+                const localVer = installed.versionOfPlugin || '0.0.0';
+                const cmp = compareVersions(localVer, remoteMeta.version);
+                if (cmp > 0) {
+                    updates.push({
+                        name: remoteName,
+                        localVersion: localVer,
+                        remoteVersion: remoteMeta.version,
+                        file: remoteMeta.file || '',
+                        sha256: remoteMeta.sha256 || '',
+                        changes: remoteMeta.changes || '',
+                    });
+                }
+            }
+        } catch (/** @type {any} */ e) {
+            console.warn('[CPM SubCheck] Failed to check sub-plugin versions:', e.message || e);
+        }
+        return updates;
+    }
+
+    /**
+     * Get the last detected sub-plugin updates (populated by checkVersionsQuiet).
+     * @returns {Array<{name: string, localVersion: string, remoteVersion: string, file?: string, sha256?: string, changes?: string}>}
+     */
+    function getSubPluginUpdates() {
+        return _lastSubPluginUpdates.slice();
+    }
+
+    // ── Per-sub-plugin auto-update toggle (pluginStorage-based) ──
+
+    const SUB_TOGGLE_PREFIX = 'cpm_sub_autoupdate_';
+
+    /**
+     * Check if auto-update is enabled for a specific sub-plugin.
+     * Defaults to true (enabled) if not explicitly disabled.
+     * @param {string} name - Sub-plugin name
+     * @returns {Promise<boolean>}
+     */
+    async function isSubPluginAutoUpdateEnabled(name) {
+        try {
+            const key = SUB_TOGGLE_PREFIX + name.replace(/\s+/g, '_');
+            const val = await Risu.pluginStorage.getItem(key);
+            if (val === null || val === undefined) return true; // default ON
+            const raw = String(val).trim().toLowerCase();
+            return raw !== 'false' && raw !== '0' && raw !== 'off' && raw !== 'no';
+        } catch (_) {
+            return true; // default ON on error
+        }
+    }
+
+    /**
+     * Set auto-update enabled/disabled for a specific sub-plugin.
+     * @param {string} name - Sub-plugin name
+     * @param {boolean} enabled
+     * @returns {Promise<void>}
+     */
+    async function setSubPluginAutoUpdateEnabled(name, enabled) {
+        const key = SUB_TOGGLE_PREFIX + name.replace(/\s+/g, '_');
+        await Risu.pluginStorage.setItem(key, enabled ? 'true' : 'false');
+    }
+
+    /**
+     * Get auto-update toggle states for all installed sub-plugins.
+     * Returns an array of {name, enabled} for each sub-plugin found in DB.
+     * @returns {Promise<Array<{name: string, enabled: boolean}>>}
+     */
+    async function getSubPluginToggleStates() {
+        const states = [];
+        try {
+            const db = await Risu.getDatabase();
+            if (!db?.plugins || !Array.isArray(db.plugins)) return states;
+            for (const p of db.plugins) {
+                if (!p?.name) continue;
+                if (p.name === pluginName || p.name === DB_PLUGIN_NAME) continue;
+                const enabled = await isSubPluginAutoUpdateEnabled(p.name);
+                states.push({ name: p.name, enabled });
+            }
+        } catch (_) { /* silent */ }
+        return states;
+    }
+
+    /**
+     * Validate and install a sub-plugin code to DB (direct replacement).
+     * Mirrors validateAndInstall logic but for any named plugin.
+     * @param {string} code - Downloaded plugin code
+     * @param {string} expectedName - Expected plugin name
+     * @param {string} expectedVersion - Expected plugin version
+     * @param {string} [expectedSha256] - Expected SHA-256 hash
+     * @returns {Promise<{ok: boolean, error?: string}>}
+     */
+    async function validateAndInstallSubPlugin(code, expectedName, expectedVersion, expectedSha256) {
+        const LOG = '[CPM SubInstall]';
+
+        if (!code || code.length < 50) {
+            return { ok: false, error: '서브 플러그인 코드가 비어있거나 너무 짧습니다' };
+        }
+
+        // SHA-256 verification
+        if (expectedSha256) {
+            const actualHash = await computeSHA256(code);
+            if (actualHash && actualHash !== expectedSha256) {
+                return { ok: false, error: `SHA-256 불일치: 기대 ${expectedSha256.substring(0, 12)}…, 실제 ${actualHash.substring(0, 12)}…` };
+            }
+        }
+
+        // Parse headers
+        const lines = code.split('\n');
+        let parsedName = '', parsedVersion = '', parsedApiVersion = '2.0', parsedDisplayName = '', parsedUpdateURL = '';
+        /** @type {Record<string, 'int'|'string'>} */
+        const parsedArgs = {};
+        /** @type {Record<string, string|number>} */
+        const defaultRealArg = {};
+        /** @type {Record<string, Record<string, string>>} */
+        const parsedArgMeta = {};
+        /** @type {Array<{link: string, hoverText?: string}>} */
+        const parsedCustomLink = [];
+
+        for (const line of lines) {
+            const nameMatch = line.match(/^\/\/@name\s+(.+)/);
+            if (nameMatch) parsedName = nameMatch[1].trim();
+            const displayMatch = line.match(/^\/\/@display-name\s+(.+)/);
+            if (displayMatch) parsedDisplayName = displayMatch[1].trim();
+            const verMatch = line.match(/^\/\/@version\s+(.+)/);
+            if (verMatch) parsedVersion = verMatch[1].trim();
+            const urlMatch = line.match(/^\/\/@update-url\s+(\S+)/);
+            if (urlMatch) parsedUpdateURL = urlMatch[1];
+            if (/^\/\/@api\s/.test(line)) {
+                const vers = line.replace(/^\/\/@api\s+/, '').trim().split(' ');
+                for (const v of vers) { if (['2.0', '2.1', '3.0'].includes(v)) { parsedApiVersion = v; break; } }
+            }
+            if (/^\/\/@(?:arg|risu-arg)\s/.test(line)) {
+                const parts = line.trim().split(' ');
+                if (parts.length >= 3) {
+                    const key = parts[1];
+                    const type = parts[2];
+                    if (type === 'int' || type === 'string') {
+                        parsedArgs[key] = type;
+                        defaultRealArg[key] = type === 'int' ? 0 : '';
+                    }
+                    if (parts.length > 3) {
+                        /** @type {Record<string, string>} */
+                        const meta = {};
+                        parts.slice(3).join(' ').replace(/\{\{(.+?)(::?(.+?))?\}\}/g, (/** @type {any} */ _, /** @type {string} */ g1, /** @type {any} */ _g2, /** @type {string} */ g3) => {
+                            meta[g1] = g3 || '1';
+                            return '';
+                        });
+                        if (Object.keys(meta).length > 0) parsedArgMeta[key] = meta;
+                    }
+                }
+            }
+            if (/^\/\/@link\s/.test(line)) {
+                const link = line.split(' ')[1];
+                if (link && link.startsWith('https')) {
+                    const hoverText = line.split(' ').slice(2).join(' ').trim();
+                    parsedCustomLink.push({ link, hoverText: hoverText || undefined });
+                }
+            }
+        }
+
+        if (!parsedName) {
+            return { ok: false, error: '서브 플러그인 코드에서 이름(@name)을 찾을 수 없습니다' };
+        }
+        const expectedDbName = expectedName.replace(/\s+/g, '_');
+        if (parsedName !== expectedName && parsedName !== expectedDbName) {
+            return { ok: false, error: `이름 불일치: "${parsedName}" ≠ "${expectedName}"` };
+        }
+        if (!parsedVersion) {
+            return { ok: false, error: '서브 플러그인 코드에서 버전(@version)을 찾을 수 없습니다' };
+        }
+        if (expectedVersion && parsedVersion !== expectedVersion) {
+            return { ok: false, error: `버전 불일치: 기대 ${expectedVersion}, 실제 ${parsedVersion}` };
+        }
+
+        console.log(`${LOG} Parsed: name=${parsedName} ver=${parsedVersion} api=${parsedApiVersion} args=${Object.keys(parsedArgs).length}`);
+
+        try {
+            const db = await Risu.getDatabase();
+            if (!db?.plugins || !Array.isArray(db.plugins)) {
+                return { ok: false, error: 'RisuAI 플러그인 목록을 찾을 수 없습니다' };
+            }
+
+            const existingIdx = db.plugins.findIndex(
+                (/** @type {any} */ p) => p.name === expectedDbName || p.name === expectedName
+            );
+            if (existingIdx === -1) {
+                return { ok: false, error: `기존 "${expectedName}" 서브 플러그인을 DB에서 찾을 수 없습니다` };
+            }
+
+            const existing = db.plugins[existingIdx];
+            const currentInstalledVersion = existing.versionOfPlugin || '0.0.0';
+            const direction = compareVersions(currentInstalledVersion, parsedVersion);
+            if (direction === 0) {
+                return { ok: false, error: `이미 같은 버전입니다: ${parsedVersion}` };
+            }
+            if (direction < 0) {
+                return { ok: false, error: `다운그레이드 차단: 현재 ${currentInstalledVersion} > 다운로드 ${parsedVersion}` };
+            }
+
+            // Preserve existing settings
+            const oldRealArg = existing.realArg || {};
+            /** @type {Record<string, any>} */
+            const mergedRealArg = {};
+            for (const [key, type] of Object.entries(parsedArgs)) {
+                if (key in oldRealArg && existing.arguments && existing.arguments[key] === type) {
+                    mergedRealArg[key] = oldRealArg[key];
+                } else {
+                    mergedRealArg[key] = defaultRealArg[key];
+                }
+            }
+
+            /** @type {any} */
+            const updatedPlugin = {
+                name: parsedName,
+                displayName: parsedDisplayName || parsedName,
+                script: code,
+                arguments: parsedArgs,
+                realArg: mergedRealArg,
+                argMeta: parsedArgMeta,
+                version: parsedApiVersion,
+                customLink: parsedCustomLink,
+                versionOfPlugin: parsedVersion,
+                updateURL: parsedUpdateURL || existing.updateURL || '',
+                enabled: existing.enabled !== false,
+            };
+
+            // TOCTOU re-verification
+            const freshDb = await Risu.getDatabase();
+            const freshPlugin = freshDb?.plugins?.find?.(
+                (/** @type {any} */ p) => p.name === expectedDbName || p.name === expectedName
+            );
+            if (freshPlugin && freshPlugin.versionOfPlugin && freshPlugin.versionOfPlugin !== currentInstalledVersion) {
+                const freshCmp = compareVersions(freshPlugin.versionOfPlugin, parsedVersion);
+                if (freshCmp <= 0) {
+                    return { ok: false, error: `동시 업데이트 감지: ${expectedName} 버전이 ${currentInstalledVersion}→${freshPlugin.versionOfPlugin}로 변경됨` };
+                }
+            }
+
+            const freshPlugins = freshDb.plugins.slice();
+            const freshIdx = freshPlugins.findIndex(
+                (/** @type {any} */ p) => p.name === expectedDbName || p.name === expectedName
+            );
+            if (freshIdx === -1) {
+                return { ok: false, error: `"${expectedName}" 서브 플러그인을 DB에서 찾을 수 없습니다 (재검증 실패)` };
+            }
+            freshPlugins[freshIdx] = updatedPlugin;
+
+            const writeResult = await safeSetDatabaseLite(Risu, { plugins: freshPlugins });
+            if (!writeResult.ok) {
+                return { ok: false, error: `DB write rejected: ${writeResult.error}` };
+            }
+
+            console.log(`${LOG} ✓ ${expectedName}: ${currentInstalledVersion} → ${parsedVersion} (${Object.keys(mergedRealArg).length} args preserved)`);
+            return { ok: true };
+        } catch (/** @type {any} */ e) {
+            return { ok: false, error: `DB 저장 실패: ${e.message || e}` };
+        }
+    }
+
+    /**
+     * Download and install a sub-plugin update.
+     * @param {{name: string, remoteVersion: string, file?: string, sha256?: string, changes?: string}} updateInfo
+     * @returns {Promise<{ok: boolean, error?: string}>}
+     */
+    async function safeSubPluginUpdate(updateInfo) {
+        const { name, remoteVersion, file, sha256, changes } = updateInfo;
+        const LOG = '[CPM SubUpdate]';
+
+        try {
+            // Build download URL from update bundle
+            const bundleUrl = updateBundleUrl + '?_t=' + Date.now();
+            console.log(`${LOG} Downloading ${name} v${remoteVersion}...`);
+
+            const bundleResult = await _withTimeout(
+                Risu.risuFetch(bundleUrl, { method: 'GET', plainFetchForce: true }),
+                20000, `sub-plugin bundle fetch timed out (20s)`
+            );
+
+            if (!bundleResult?.data || (bundleResult.status && bundleResult.status >= 400)) {
+                return { ok: false, error: `번들 다운로드 실패 (status=${bundleResult?.status})` };
+            }
+
+            const rawBundle = typeof bundleResult.data === 'string' ? JSON.parse(bundleResult.data) : bundleResult.data;
+            const fileName = file || (name.replace(/\s+/g, '-').toLowerCase() + '.js');
+            const bundledCode = rawBundle?.code?.[fileName];
+
+            if (!bundledCode || typeof bundledCode !== 'string') {
+                return { ok: false, error: `번들에서 ${name}의 코드(${fileName})를 찾을 수 없습니다` };
+            }
+
+            // SHA-256 verification
+            if (sha256) {
+                const actualHash = await computeSHA256(bundledCode);
+                if (actualHash && actualHash !== sha256) {
+                    return { ok: false, error: `SHA-256 불일치: ${name}` };
+                }
+            }
+
+            const result = await validateAndInstallSubPlugin(bundledCode, name, remoteVersion, sha256);
+            if (!result.ok) {
+                console.error(`${LOG} ${name} install failed: ${result.error}`);
+            }
+            return result;
+        } catch (/** @type {any} */ e) {
+            return { ok: false, error: `${name} 업데이트 실패: ${e.message || e}` };
+        }
+    }
+
+    /**
+     * Run sub-plugin updates sequentially (one at a time) to prevent DB corruption.
+     * @param {Array<{name: string, remoteVersion: string, file?: string, sha256?: string, changes?: string}>} updates
+     * @returns {Promise<{total: number, success: number, failed: number, results: Array<{name: string, ok: boolean, error?: string}>}>}
+     */
+    async function runSequentialSubPluginUpdates(updates) {
+        if (_subUpdateQueueInFlight) {
+            console.log('[CPM SubUpdate] Sub-plugin update already in flight — waiting.');
+            await _subUpdateQueueInFlight;
+        }
+
+        const results = [];
+        let success = 0, failed = 0;
+
+        _subUpdateQueueInFlight = (async () => {
+            for (const update of updates) {
+                console.log(`[CPM SubUpdate] ── Updating ${update.name} (${updates.indexOf(update) + 1}/${updates.length}) ──`);
+                const result = await safeSubPluginUpdate(update);
+                results.push({ name: update.name, ...result });
+                if (result.ok) {
+                    success++;
+                    // Small delay between updates to let autosave settle
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } else {
+                    failed++;
+                }
+            }
+        })();
+
+        try {
+            await _subUpdateQueueInFlight;
+        } finally {
+            _subUpdateQueueInFlight = null;
+        }
+
+        console.log(`[CPM SubUpdate] ── Complete: ${success} success, ${failed} failed out of ${updates.length} ──`);
+        return { total: updates.length, success, failed, results };
+    }
+
     // ── Public API ──
     return {
         // Core operations
@@ -924,6 +1330,20 @@ export function createAutoUpdater(deps) {
 
         // Auto-update toggle check
         _isAutoUpdateEnabled,
+
+        // Sub-plugin operations
+        getSubPluginUpdates,
+        validateAndInstallSubPlugin,
+        safeSubPluginUpdate,
+        runSequentialSubPluginUpdates,
+
+        // Sub-plugin toggle
+        isSubPluginAutoUpdateEnabled,
+        setSubPluginAutoUpdateEnabled,
+        getSubPluginToggleStates,
+
+        // Internal (for testing)
+        _checkSubPluginVersions,
 
         // Constants (for testing)
         _constants: {

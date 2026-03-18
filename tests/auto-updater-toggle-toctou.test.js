@@ -97,6 +97,7 @@ function createUpdater(risuOverrides = {}, depsOverrides = {}) {
             mainUpdateUrl: 'https://example.com/plugin.js',
             updateBundleUrl: 'https://example.com/bundle.json',
             toast: { showMainAutoUpdateResult: vi.fn(async () => {}) },
+            _autoSaveDelayMs: 0,
             ...depsOverrides,
         }),
         Risu,

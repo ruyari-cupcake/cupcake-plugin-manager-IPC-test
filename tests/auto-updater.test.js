@@ -143,6 +143,7 @@ describe('createAutoUpdater', () => {
             versionsUrl: 'https://test.vercel.app/api/versions',
             mainUpdateUrl: 'https://test.vercel.app/api/main-plugin',
             updateBundleUrl: 'https://test.vercel.app/api/update-bundle',
+            _autoSaveDelayMs: 0,
             ...overrides,
         });
     }
@@ -239,6 +240,7 @@ describe('createAutoUpdater', () => {
                 currentVersion: '1.18.0',
                 pluginName: 'Cupcake Provider Manager',
                 versionsUrl: '', mainUpdateUrl: '', updateBundleUrl: '',
+                _autoSaveDelayMs: 0,
             });
             const version = await updater.getInstalledVersion();
             expect(version).toBe('1.18.0');
@@ -360,6 +362,7 @@ describe('createAutoUpdater', () => {
                 pluginName: 'Cupcake Provider Manager',
                 versionsUrl: '', mainUpdateUrl: '', updateBundleUrl: '',
                 toast: mockToast,
+                _autoSaveDelayMs: 0,
             });
             const result = await updater.validateAndInstall(validCode, '1.20.0');
             expect(result.ok).toBe(true);
@@ -374,6 +377,7 @@ describe('createAutoUpdater', () => {
                 currentVersion: '1.19.0',
                 pluginName: 'Cupcake Provider Manager',
                 versionsUrl: '', mainUpdateUrl: '', updateBundleUrl: '',
+                _autoSaveDelayMs: 0,
             });
             const result = await updater.validateAndInstall(validCode, '1.20.0');
             expect(result.ok).toBe(false);
@@ -388,6 +392,7 @@ describe('createAutoUpdater', () => {
                 currentVersion: '1.19.0',
                 pluginName: 'Cupcake Provider Manager',
                 versionsUrl: '', mainUpdateUrl: '', updateBundleUrl: '',
+                _autoSaveDelayMs: 0,
             });
             const result = await updater.validateAndInstall(validCode, '1.20.0');
             expect(result.ok).toBe(false);

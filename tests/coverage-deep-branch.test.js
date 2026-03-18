@@ -262,6 +262,7 @@ function makeAutoUpdaterDeps(overrides = {}) {
         updateBundleUrl: 'https://test.example.com/api/update-bundle',
         toast: { showMainAutoUpdateResult: vi.fn() },
         validateSchema: null,
+        _autoSaveDelayMs: 0,
         Risu: {
             pluginStorage: {
                 getItem: vi.fn(async () => null),

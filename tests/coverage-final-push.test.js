@@ -101,6 +101,7 @@ function makeMockDeps(overrides = {}) {
         updateBundleUrl: 'https://example.com/bundle.json',
         toast: { showMainAutoUpdateResult: vi.fn(async () => {}) },
         validateSchema: vi.fn((v) => ({ valid: true, value: v })),
+        _autoSaveDelayMs: 0,
         ...overrides,
     };
 }

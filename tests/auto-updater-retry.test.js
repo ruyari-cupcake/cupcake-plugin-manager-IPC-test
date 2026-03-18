@@ -142,6 +142,7 @@ describe('createAutoUpdater — retryPendingUpdateOnBoot', () => {
             updateBundleUrl: 'https://example.com/bundle',
             toast: vi.fn(),
             validateSchema: vi.fn().mockReturnValue({ valid: true, value: {} }),
+            _autoSaveDelayMs: 0,
         };
         updater = createAutoUpdater(mockDeps);
     });
@@ -245,6 +246,7 @@ describe('createAutoUpdater — pending update CRUD', () => {
             updateBundleUrl: 'https://example.com/bundle',
             toast: vi.fn(),
             validateSchema: vi.fn().mockReturnValue({ valid: true, value: {} }),
+            _autoSaveDelayMs: 0,
         };
         updater = createAutoUpdater(deps);
     });

@@ -30,8 +30,8 @@ export class AwsV4Signer {
         appendSessionToken, allHeaders, singleEncode
     }) {
         if (url == null) throw new TypeError("url is a required option");
-        if (accessKeyId == null) throw new TypeError("accessKeyId is a required option");
-        if (secretAccessKey == null) throw new TypeError("secretAccessKey is a required option");
+        if (!accessKeyId) throw new TypeError("accessKeyId is a required option");
+        if (!secretAccessKey) throw new TypeError("secretAccessKey is a required option");
 
         this.method = method || (body ? "POST" : "GET");
         this.url = new URL(url);

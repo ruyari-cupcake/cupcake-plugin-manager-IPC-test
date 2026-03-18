@@ -56,6 +56,7 @@ describe('auto-updater: checkVersionsQuiet', () => {
             versionsUrl: 'https://test.vercel.app/api/versions',
             mainUpdateUrl: 'https://test.vercel.app/api/main-plugin',
             updateBundleUrl: 'https://test.vercel.app/api/update-bundle',
+            _autoSaveDelayMs: 0,
         });
     }
 
@@ -213,6 +214,7 @@ describe('auto-updater: checkMainPluginVersionQuiet', () => {
             versionsUrl: 'https://test.vercel.app/api/versions',
             mainUpdateUrl: 'https://test.vercel.app/api/main-plugin',
             updateBundleUrl: 'https://test.vercel.app/api/update-bundle',
+            _autoSaveDelayMs: 0,
         });
     }
 
@@ -2760,6 +2762,11 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
     const DB_PLUGIN_NAME = 'Test Plugin';
     const currentVersion = '1.0.0';
 
+    /** @param {Record<string,any>} [overrides] */
+    function mkUpdater(overrides = {}) {
+        return createAutoUpdater({ Risu: overrides.Risu || makeRisu(), pluginName: DB_PLUGIN_NAME, currentVersion, _autoSaveDelayMs: 0, ...overrides });
+    }
+
     function makeRisu(existingPlugin) {
         return {
             getArgument: vi.fn(() => undefined),
@@ -2797,36 +2804,21 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
 
     it('parses @arg with metadata templates', async () => {
         const code = makeCode('2.0.0', '//@arg myKey string {{label::My Label}} {{desc::Description}}');
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(true);
     });
 
     it('parses @risu-arg with single colon metadata', async () => {
         const code = makeCode('2.0.0', '//@risu-arg apiKey string {{label:API Key}}');
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(true);
     });
 
     it('parses @arg int type with default value', async () => {
         const code = makeCode('2.0.0', '//@arg maxRetries int');
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(true);
     });
@@ -2838,13 +2830,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
             `//@api 2.0`,
             `console.log('hello');`.repeat(10),
         ].join('\n');
-
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(false);
         expect(result.error).toContain('API');
@@ -2852,12 +2838,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
 
     it('parses @link directives', async () => {
         const code = makeCode('2.0.0', '//@link https://example.com My Link');
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(true);
     });
@@ -2868,13 +2849,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
             `//@api 3.0`,
             `console.log('hello');`.repeat(10),
         ].join('\n');
-
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(false);
         expect(result.error).toContain('@name');
@@ -2886,13 +2861,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
             `//@api 3.0`,
             `console.log('hello');`.repeat(10),
         ].join('\n');
-
-        const updater = createAutoUpdater({
-            Risu: makeRisu(),
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater();
         const result = await updater.validateAndInstall(code, '', '');
         expect(result.ok).toBe(false);
         expect(result.error).toContain('@version');
@@ -2902,13 +2871,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
         const code = makeCode('2.0.0');
         const Risu = makeRisu();
         Risu.getDatabase = vi.fn(async () => ({ plugins: [{ name: 'Other Plugin' }] }));
-
-        const updater = createAutoUpdater({
-            Risu,
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater({ Risu });
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(false);
         expect(result.error).toContain('찾을 수 없습니다');
@@ -2918,13 +2881,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
         const code = makeCode('2.0.0');
         const Risu = makeRisu();
         Risu.getDatabase = vi.fn(async () => null);
-
-        const updater = createAutoUpdater({
-            Risu,
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater({ Risu });
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(false);
     });
@@ -2933,13 +2890,7 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
         const code = makeCode('2.0.0');
         const Risu = makeRisu();
         Risu.getDatabase = vi.fn(async () => ({ plugins: null }));
-
-        const updater = createAutoUpdater({
-            Risu,
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater({ Risu });
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(false);
     });
@@ -2955,16 +2906,9 @@ describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
         };
         const code = makeCode('2.0.0', '//@arg myKey string');
         const Risu = makeRisu(existingPlugin);
-
-        const updater = createAutoUpdater({
-            Risu,
-            pluginName: DB_PLUGIN_NAME,
-            currentVersion,
-        });
-
+        const updater = mkUpdater({ Risu });
         const result = await updater.validateAndInstall(code, '2.0.0', '');
         expect(result.ok).toBe(true);
-        // Check the setDatabaseLite call preserved the value
         const call = Risu.setDatabaseLite.mock.calls[0][0];
         expect(call.plugins[0].realArg.myKey).toBe('saved-value');
     });
@@ -2991,6 +2935,7 @@ describe('auto-updater: downloadMainPluginCode edge cases', () => {
             Risu,
             pluginName: 'Test',
             currentVersion: '1.0.0',
+            _autoSaveDelayMs: 0,
         });
 
         const result = await updater.downloadMainPluginCode('2.0.0');

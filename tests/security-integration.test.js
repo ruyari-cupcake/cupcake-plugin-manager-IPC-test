@@ -88,6 +88,7 @@ describe('auto-updater + safe-db-writer integration', () => {
             updateBundleUrl: BUNDLE_URL,
             toast: vi.fn(),
             validateSchema: vi.fn(),
+            _autoSaveDelayMs: 0,
         });
 
         const _result = await updater.safeMainPluginUpdate();

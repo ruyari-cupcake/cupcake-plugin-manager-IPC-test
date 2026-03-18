@@ -934,6 +934,7 @@ describe('auto-updater: validateAndInstall metadata parsing', () => {
             pluginName: 'TestPlugin',
             currentVersion: '1.0.0',
             updateURL: 'https://example.com/plugin.js',
+            _autoSaveDelayMs: 0,
         });
     }
 

@@ -76,9 +76,11 @@ export async function ensureCopilotApiToken(deps = {}) {
                 return data.token;
             }
             // SEC-4: New API format — model list response (data.data array)
-            // In this case, the OAuth token itself can be used as the API token
-            if (Array.isArray(data?.data)) {
-                console.log('[Copilot] Model-list response detected, using OAuth token as API token');
+            // In this case, the OAuth token itself can be used as the API token.
+            // Validate the response contains at least one model entry to confirm
+            // this is genuinely a model list and not a spoofed/empty array.
+            if (Array.isArray(data?.data) && data.data.length > 0 && data.data[0]?.id) {
+                console.log(`[Copilot] Model-list response detected (${data.data.length} models), using OAuth token as API token`);
                 _copilotTokenCache = { token: cleanToken, expiry: Date.now() + 1800000 };
                 return cleanToken;
             }
