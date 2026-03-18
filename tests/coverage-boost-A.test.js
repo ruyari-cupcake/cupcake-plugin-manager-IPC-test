@@ -2428,7 +2428,6 @@ describe('helpers: shouldEnableStreaming edge cases', () => {
 // ──────────────────────────────────────────────
 // 4. message-format.js — audio, cache, gemini system msg
 // ──────────────────────────────────────────────
-import { formatToOpenAI, formatToAnthropic, formatToGemini } from '../src/shared/message-format.js';
 
 describe('formatToOpenAI — audio modal branches', () => {
     const makeMsg = (mimeInUri) => [
@@ -2756,7 +2755,6 @@ describe('sse-parser: saveThoughtSignatureFromStream', () => {
 // ──────────────────────────────────────────────
 // 6. auto-updater.js — arg parsing, schema validation
 // ──────────────────────────────────────────────
-import { createAutoUpdater } from '../src/shared/auto-updater.js';
 
 describe('auto-updater: validateAndInstall — arg metadata parsing', () => {
     const DB_PLUGIN_NAME = 'Test Plugin';

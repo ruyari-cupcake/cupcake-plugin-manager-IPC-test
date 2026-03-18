@@ -2,9 +2,10 @@
 
 > RisuAI V3 Plugin Channel IPC 기반 AI 프로바이더 허브
 
-[![Tests](https://img.shields.io/badge/tests-1773%20passed-brightgreen)](#테스트)
+[![Tests](https://img.shields.io/badge/tests-3109%20passed-brightgreen)](#테스트)
+[![Coverage](https://img.shields.io/badge/branch%20coverage-90.7%25-brightgreen)](#커버리지)
 [![TypeScript](https://img.shields.io/badge/TS%20errors-0-blue)](#타입-체크)
-[![ESLint](https://img.shields.io/badge/ESLint-0%20warnings-blue)](#린트--포맷)
+[![ESLint](https://img.shields.io/badge/ESLint-0%20errors-blue)](#린트--포맷)
 
 ## 아키텍처
 
@@ -58,6 +59,16 @@ npm run test:watch
 # 커버리지 보고서
 npm run test:coverage
 ```
+
+**커버리지 현황 (v8):**
+
+| 모듈 | Stmts | Branch | Funcs | Lines |
+|---|---|---|---|---|
+| **All files** | 96.04% | **90.70%** | 97.18% | 97.68% |
+| auto-updater.js | 98.07% | 91.33% | 100% | 98.20% |
+| message-format.js | 90.28% | 83.82% | 100% | 92.70% |
+| sse-parser.js | 97.15% | 90.02% | 100% | 97.71% |
+| helpers.js | 86.71% | 84.15% | 86.48% | 93.67% |
 
 ### 린트 & 포맷
 
@@ -123,11 +134,12 @@ src/
     ├── resizer.js            # 채팅 리사이저
     └── navigation.js         # 채팅 네비게이션
 
-tests/                        # Vitest 테스트 (53 파일, 1773 테스트)
-├── *.test.js                 # 유닛 테스트 (49 파일)
-├── *.integration.test.js     # 통합 테스트 (4 파일)
-├── safe-db-writer.test.js    # setDatabaseLite 보안 검증 (21 테스트)
-└── security-integration.test.js  # 보안 통합 시나리오 (12 테스트)
+tests/                        # Vitest 테스트 (70+ 파일, 3109 테스트)
+├── *.test.js                 # 유닛 테스트
+├── *.integration.test.js     # 통합 테스트
+├── coverage-*.test.js        # 커버리지 푸시 테스트
+├── safe-db-writer.test.js    # setDatabaseLite 보안 검증
+└── security-integration.test.js  # 보안 통합 시나리오
 
 dist/                         # Rollup IIFE 빌드 출력
 ```
@@ -219,7 +231,6 @@ if (!result.ok) console.error(result.error);
 
 `setupChannelCleanup()`으로 플러그인 언로드 시 IPC 리스너를 no-op으로 교체합니다.
 완전한 수정은 RisuAI 본체의 `unloadV3Plugin()`에 `pluginChannel.delete()` 추가가 필요합니다.
-→ [PLUGIN_CHANNEL_DELETE_PATCH_DESIGN.md](PLUGIN_CHANNEL_DELETE_PATCH_DESIGN.md)
 
 ## 향후 계획
 

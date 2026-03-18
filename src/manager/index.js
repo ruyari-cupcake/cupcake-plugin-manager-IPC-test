@@ -3310,8 +3310,9 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             }
             container.querySelectorAll('.cpm-sub-toggle').forEach(btn => {
                 btn.addEventListener('click', async () => {
-                    const name = btn.dataset.name;
-                    const wasEnabled = btn.dataset.enabled === 'true';
+                    const el = /** @type {HTMLElement} */ (btn);
+                    const name = el.dataset.name;
+                    const wasEnabled = el.dataset.enabled === 'true';
                     const newEnabled = !wasEnabled;
                     try {
                         await AutoUpdater.setSubPluginAutoUpdateEnabled(name, newEnabled);

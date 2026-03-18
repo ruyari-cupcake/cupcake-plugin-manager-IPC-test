@@ -572,6 +572,14 @@ import {
     parseClaudeNonStreamingResponse,
     parseGeminiNonStreamingResponse,
     createSSEStream,
+    parseOpenAISSELine,
+    createOpenAISSEStream,
+    saveThoughtSignatureFromStream,
+    parseOpenAINonStreamingResponse,
+    parseResponsesAPINonStreamingResponse,
+    normalizeOpenAIMessageContent,
+    ThoughtSignatureCache,
+    GEMINI_BLOCK_REASONS,
 } from '../src/shared/sse-parser.js';
 
 function makeSSEResponse(text) {
@@ -1195,23 +1203,6 @@ describe('helpers: collectStream additional paths', () => {
 // Merged from coverage-boost-pass3.test.js
 // ═══════════════════════════════════════════════════════════════
 
-
-import { formatToAnthropic, formatToGemini, formatToOpenAI } from '../src/shared/message-format.js';
-import { collectStream } from '../src/shared/helpers.js';
-import {
-    parseGeminiSSELine,
-    parseOpenAISSELine,
-    createOpenAISSEStream,
-    createAnthropicSSEStream,
-    saveThoughtSignatureFromStream,
-    parseClaudeNonStreamingResponse,
-    parseGeminiNonStreamingResponse,
-    parseOpenAINonStreamingResponse,
-    parseResponsesAPINonStreamingResponse,
-    normalizeOpenAIMessageContent,
-    ThoughtSignatureCache,
-    GEMINI_BLOCK_REASONS,
-} from '../src/shared/sse-parser.js';
 
 const mkMsg = (role, content, extra = {}) => ({ role, content, ...extra });
 

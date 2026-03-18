@@ -58,7 +58,6 @@ function makeDeps(overrides = {}) {
         toast: { showMainAutoUpdateResult: vi.fn(async () => {}) },
         validateSchema: vi.fn((v) => ({ valid: true, value: v })),
         ...overrides,
-        Risu: undefined,  // re-set below
     };
 }
 
