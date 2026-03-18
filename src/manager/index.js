@@ -48,6 +48,7 @@ import { COPILOT_CHAT_VERSION, VSCODE_VERSION, getCopilotStaticHeaders, shouldUs
 import { VERSIONS_URL, MAIN_UPDATE_URL, UPDATE_BUNDLE_URL } from '../shared/endpoints.js';
 import { createUpdateToast } from '../shared/update-toast.js';
 import { createAutoUpdater } from '../shared/auto-updater.js';
+import { createSubPluginToggleUI } from '../shared/sub-plugin-toggle-ui.js';
 import { parseCustomModelsValue, normalizeCustomModel, serializeCustomModelExport, serializeCustomModelsSetting } from '../shared/custom-model-serialization.js';
 import { TAILWIND_CSS } from '../shared/tailwind-css.generated.js';
 
@@ -186,6 +187,7 @@ const AutoUpdater = createAutoUpdater({
     updateBundleUrl: UPDATE_BUNDLE_URL,
     toast: UpdateToast,
 });
+const SubPluginToggleUI = createSubPluginToggleUI({ Risu, escHtml: _escHtml });
 
 // ==========================================
 // COPILOT TOKEN MANAGEMENT
@@ -2127,6 +2129,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
 
                 <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mt-5 mb-2">Features</div>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-copilot">🔑 Copilot Token</button>
+                <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-subplugins">🧩 서브 플러그인</button>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-operations">🧹 운영/복구</button>
 
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-diagnostics">🔍 진단 (Diagnostics)</button>
@@ -2286,6 +2289,28 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <button id="cpm-copilot-info" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">ℹ️</span><span>설정 안내</span></button>
             </div>
             <div id="cpm-copilot-result" class="hidden"></div>
+        </div>
+
+        <div id="tab-subplugins" class="cpm-tab-content hidden">
+            <h3 class="text-3xl font-bold text-teal-400 mb-6 pb-3 border-b border-gray-700">🧩 서브 플러그인 자동 업데이트</h3>
+            <p class="text-teal-300 font-semibold mb-6 border-l-4 border-teal-500 pl-4 py-1">
+                개별 서브 플러그인의 자동 업데이트를 켜거나 끌 수 있습니다. 비활성화한 서브 플러그인은 버전 체크 시 건너뜁니다.
+            </p>
+            <div class="bg-gray-800/70 border border-teal-900/50 rounded-lg p-4 mb-6">
+                <p class="text-xs text-teal-300 mb-2 font-semibold">💡 동작 방식</p>
+                <p class="text-xs text-gray-400 mb-1">• 토글을 끄면 해당 서브 플러그인의 자동 업데이트만 비활성화됩니다.</p>
+                <p class="text-xs text-gray-400 mb-1">• 전체 자동 업데이트(cpm_auto_update_enabled)가 끄면 개별 토글과 무관하게 모두 중지됩니다.</p>
+                <p class="text-xs text-gray-400">• 기본값은 활성(ON) 상태입니다.</p>
+            </div>
+            <div id="cpm-subplugin-toggle-container" class="space-y-3">
+                <div class="text-center text-gray-500 py-8 border border-dashed border-gray-700 rounded-lg">
+                    <div class="text-2xl mb-2">⏳</div>
+                    로딩 중...
+                </div>
+            </div>
+            <div class="mt-4 flex gap-3">
+                <button id="cpm-subplugin-refresh" class="bg-teal-700 hover:bg-teal-600 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow touch-manipulation">🔄 새로고침</button>
+            </div>
         </div>
 
         <div id="tab-operations" class="cpm-tab-content hidden">
@@ -3254,6 +3279,54 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     });
 
     void _refreshOperationsPanel();
+
+    // ─── SUB-PLUGIN TOGGLE PANEL ───
+    async function _renderSubPluginTogglePanel() {
+        const container = document.getElementById('cpm-subplugin-toggle-container');
+        if (!container) return;
+        try {
+            const states = await AutoUpdater.getSubPluginToggleStates();
+            if (states.length === 0) {
+                container.innerHTML = `<div class="text-center text-gray-500 py-8 border border-dashed border-gray-700 rounded-lg">
+                    <div class="text-2xl mb-2">📭</div>
+                    등록된 서브 플러그인이 없습니다.
+                </div>`;
+                return;
+            }
+            container.innerHTML = '';
+            for (const s of states) {
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg px-4 py-3';
+                const safeName = escHtml(s.name);
+                const statusText = s.enabled ? '자동 업데이트 활성' : '자동 업데이트 비활성';
+                const statusColor = s.enabled ? 'text-emerald-400' : 'text-gray-500';
+                const bgColor = s.enabled ? 'bg-emerald-700' : 'bg-gray-600';
+                const dotPos = s.enabled ? 'left:20px' : 'left:2px';
+                row.innerHTML = `<div class="flex-1 min-w-0"><div class="text-sm font-medium text-gray-200">${safeName}</div><div class="text-xs ${statusColor}">${statusText}</div></div>
+                    <div class="cpm-sub-toggle w-10 h-[22px] rounded-full ${bgColor} cursor-pointer relative transition-colors shrink-0 ml-3" data-name="${escAttr(s.name)}" data-enabled="${s.enabled}">
+                        <div class="w-[18px] h-[18px] rounded-full bg-white absolute top-[2px] transition-all" style="${dotPos}"></div>
+                    </div>`;
+                container.appendChild(row);
+            }
+            container.querySelectorAll('.cpm-sub-toggle').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const name = btn.dataset.name;
+                    const wasEnabled = btn.dataset.enabled === 'true';
+                    const newEnabled = !wasEnabled;
+                    try {
+                        await AutoUpdater.setSubPluginAutoUpdateEnabled(name, newEnabled);
+                        await _renderSubPluginTogglePanel();
+                    } catch (e) {
+                        console.error('[CPM] Sub-plugin toggle failed:', e);
+                    }
+                });
+            });
+        } catch (e) {
+            container.innerHTML = `<div class="text-red-400 text-sm">서브 플러그인 목록을 불러오는 데 실패했습니다: ${escHtml(String(e?.message || e))}</div>`;
+        }
+    }
+    void _renderSubPluginTogglePanel();
+    document.getElementById('cpm-subplugin-refresh')?.addEventListener('click', () => _renderSubPluginTogglePanel());
 
     // ─── COPILOT TOKEN MANAGEMENT UI ───
     const _copilotResultEl = document.getElementById('cpm-copilot-result');
