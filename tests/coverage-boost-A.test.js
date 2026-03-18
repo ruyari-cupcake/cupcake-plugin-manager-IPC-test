@@ -42,6 +42,7 @@ describe('auto-updater: checkVersionsQuiet', () => {
             setDatabaseLite: vi.fn(async () => {}),
             risuFetch: vi.fn(async () => ({ data: null, status: 404 })),
             nativeFetch: vi.fn(async () => ({ ok: false, status: 404 })),
+            getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? true : ''),
             ...overrides,
         };
     }
@@ -198,6 +199,7 @@ describe('auto-updater: checkMainPluginVersionQuiet', () => {
             setDatabaseLite: vi.fn(async () => {}),
             risuFetch: vi.fn(async () => ({ data: null, status: 404 })),
             nativeFetch: vi.fn(async () => ({ ok: false, status: 404 })),
+            getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? true : ''),
             ...overrides,
         };
     }

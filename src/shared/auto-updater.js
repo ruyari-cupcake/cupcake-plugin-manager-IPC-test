@@ -130,6 +130,7 @@ export function isRetriableError(error) {
  * @property {string} updateBundleUrl - Single-bundle update URL
  * @property {{ showMainAutoUpdateResult?: (local: string, remote: string, changes: string, success: boolean, error?: string) => Promise<void> }} [toast] - Toast notifications
  * @property {(data: any, schema: any) => { valid: boolean, value: any }} [validateSchema] - Schema validator
+ * @property {string} [autoUpdateArgKey] - Plugin arg key for auto-update toggle (default: 'cpm_auto_update_enabled')
  */
 
 /**
@@ -146,6 +147,7 @@ export function createAutoUpdater(deps) {
         updateBundleUrl,
         toast,
         validateSchema,
+        autoUpdateArgKey = 'cpm_auto_update_enabled',
     } = deps;
 
     // ── Constants ──
@@ -550,9 +552,28 @@ export function createAutoUpdater(deps) {
                 enabled: existing.enabled !== false,
             };
 
-            const nextPlugins = db.plugins.slice();
-            nextPlugins[existingIdx] = updatedPlugin;
-            const writeResult = await safeSetDatabaseLite(Risu, { plugins: nextPlugins });
+            // ── TOCTOU re-verification: re-read DB to detect concurrent updates ──
+            const freshDb = await Risu.getDatabase();
+            const freshPlugin = freshDb?.plugins?.find?.(
+                (/** @type {any} */ p) => p.name === DB_PLUGIN_NAME || p.name === pluginName
+            );
+            if (freshPlugin && freshPlugin.versionOfPlugin && freshPlugin.versionOfPlugin !== currentInstalledVersion) {
+                const freshCmp = compareVersions(freshPlugin.versionOfPlugin, parsedVersion);
+                if (freshCmp <= 0) {
+                    console.log(`${LOG} Concurrent update detected: DB version changed ${currentInstalledVersion}→${freshPlugin.versionOfPlugin} while preparing ${parsedVersion}`);
+                    return { ok: false, error: `동시 업데이트 감지: DB 버전이 ${currentInstalledVersion}→${freshPlugin.versionOfPlugin}로 변경됨 (설치 대상: ${parsedVersion})` };
+                }
+            }
+
+            const freshPlugins = freshDb.plugins.slice();
+            const freshIdx = freshPlugins.findIndex(
+                (/** @type {any} */ p) => p.name === DB_PLUGIN_NAME || p.name === pluginName
+            );
+            if (freshIdx === -1) {
+                return { ok: false, error: `기존 "${pluginName}" 플러그인을 DB에서 찾을 수 없습니다 (재검증 실패)` };
+            }
+            freshPlugins[freshIdx] = updatedPlugin;
+            const writeResult = await safeSetDatabaseLite(Risu, { plugins: freshPlugins });
             if (!writeResult.ok) {
                 return { ok: false, error: `DB write rejected: ${writeResult.error}` };
             }
@@ -710,10 +731,32 @@ export function createAutoUpdater(deps) {
     /** @type {boolean} */
     let _mainVersionFromManifest = false;
 
+    /**
+     * Check if the auto-update toggle is enabled.
+     * Default is OFF — user must explicitly enable via plugin settings.
+     * @returns {Promise<boolean>}
+     */
+    async function _isAutoUpdateEnabled() {
+        try {
+            const val = await Risu.getArgument(autoUpdateArgKey);
+            if (val === true || val === 1) return true;
+            const raw = String(val ?? '').trim().toLowerCase();
+            return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on';
+        } catch (_) {
+            return false;
+        }
+    }
+
     async function checkVersionsQuiet() {
         try {
             if (_versionChecked) return;
             _versionChecked = true;
+
+            // Auto-update toggle check (default OFF)
+            if (!await _isAutoUpdateEnabled()) {
+                console.log('[CPM AutoCheck] Auto-update is disabled (cpm_auto_update_enabled=off). Skipping.');
+                return;
+            }
 
             try {
                 const lastCheck = await Risu.pluginStorage.getItem(VERSION_CHECK_STORAGE_KEY);
@@ -782,6 +825,12 @@ export function createAutoUpdater(deps) {
             }
             if (_mainVersionChecked) return;
             _mainVersionChecked = true;
+
+            // Auto-update toggle check (default OFF)
+            if (!await _isAutoUpdateEnabled()) {
+                console.log('[CPM MainAutoCheck] Auto-update is disabled (cpm_auto_update_enabled=off). Skipping.');
+                return;
+            }
 
             try {
                 const lastCheck = await Risu.pluginStorage.getItem(MAIN_VERSION_CHECK_STORAGE_KEY);
@@ -873,6 +922,9 @@ export function createAutoUpdater(deps) {
         // Utilities
         getInstalledVersion,
 
+        // Auto-update toggle check
+        _isAutoUpdateEnabled,
+
         // Constants (for testing)
         _constants: {
             VERSION_CHECK_COOLDOWN,
@@ -881,6 +933,7 @@ export function createAutoUpdater(deps) {
             VERSION_CHECK_STORAGE_KEY,
             MAIN_VERSION_CHECK_STORAGE_KEY,
             MAIN_UPDATE_RETRY_STORAGE_KEY,
+            AUTO_UPDATE_ARG_KEY: autoUpdateArgKey,
         },
     };
 }

@@ -91,7 +91,7 @@ function makeMockDeps(overrides = {}) {
             setDatabaseLite: vi.fn(async () => {}),
             risuFetch: vi.fn(async () => ({ data: null, status: 404 })),
             nativeFetch: vi.fn(async () => { throw new Error('not implemented'); }),
-            setDatabaseLite: vi.fn(async () => {}),
+            getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? true : ''),
             registerPlugin: vi.fn(),
         },
         currentVersion: '1.0.0',

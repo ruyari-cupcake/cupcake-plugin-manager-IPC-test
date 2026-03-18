@@ -13,7 +13,7 @@ import terser from '@rollup/plugin-terser';
 /* ─── Plugin entries ─── */
 const entries = [
     // Manager
-    { input: 'src/manager/index.js', name: 'cupcake-provider-manager', displayName: 'Cupcake Provider Manager', version: '2.0.0', icon: '🧁', description: 'IPC-based multi-provider manager with settings UI' },
+    { input: 'src/manager/index.js', name: 'cupcake-provider-manager', displayName: 'Cupcake Provider Manager', version: '2.0.0', icon: '🧁', description: 'IPC-based multi-provider manager with settings UI', args: ['cpm_auto_update_enabled int {{checkbox::자동 업데이트 하기}}'] },
 
     // Providers
     { input: 'src/providers/anthropic.js', name: 'cpm-provider-anthropic', displayName: 'CPM Provider - Anthropic', version: '2.0.0', icon: '🤖', description: 'Anthropic Claude provider (IPC)' },
@@ -33,7 +33,7 @@ const entries = [
 
 /* ─── Banner builder ─── */
 function makeBanner(entry) {
-    return [
+    const lines = [
         `//@api 3.0`,
         `//@name ${entry.displayName}`,
         `//@display-name ${entry.displayName}`,
@@ -41,9 +41,18 @@ function makeBanner(entry) {
         `//@description ${entry.description}`,
         `//@icon ${entry.icon}`,
         `//@author Cupcake`,
+    ];
+    // Provider-manager gets the auto-update toggle arg
+    if (entry.args) {
+        for (const arg of entry.args) {
+            lines.push(`//@arg ${arg}`);
+        }
+    }
+    lines.push(
         `// Built from cupcake-provider-v4 — IPC architecture`,
         `// Generated: ${new Date().toISOString().substring(0, 10)}`,
-    ].join('\n');
+    );
+    return lines.join('\n');
 }
 
 /* ─── Rollup config array ─── */
