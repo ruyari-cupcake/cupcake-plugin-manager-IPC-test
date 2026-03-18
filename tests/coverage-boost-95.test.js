@@ -277,7 +277,7 @@ describe('helpers: _raceWithAbortSignal — already aborted signal', () => {
     it('rejects immediately if signal is already aborted', async () => {
         const ac = new AbortController();
         ac.abort();
-        const p = new Promise(r => setTimeout(() => r('done'), 100));
+        const p = new Promise(r => setTimeout(() => r('done'), 1));
         await expect(_raceWithAbortSignal(p, ac.signal)).rejects.toThrow('aborted');
     });
 });

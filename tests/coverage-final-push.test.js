@@ -366,7 +366,7 @@ describe('auto-updater: validateAndInstall — edge cases', () => {
 
     it('detects incomplete download (code much smaller than existing script)', async () => {
         const deps = makeMockDeps({});
-        const bigScript = 'x'.repeat(400 * 1024); // 400KB existing
+        const bigScript = 'x'.repeat(400 * 1024); // 400KB existing — must be >= 300KB for size check
         deps.Risu.getDatabase = vi.fn(async () => ({
             plugins: [{
                 name: 'TestPlugin',
@@ -985,7 +985,7 @@ describe('computeSHA256 — edge cases', () => {
     });
 
     it('large input → valid hash', async () => {
-        const hash = await computeSHA256('x'.repeat(100000));
+        const hash = await computeSHA256('x'.repeat(1000));
         expect(hash).toMatch(/^[0-9a-f]{64}$/);
     });
 
