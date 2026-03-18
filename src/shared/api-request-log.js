@@ -28,7 +28,8 @@ export function createApiRequestLog(maxSize = 50) {
         update(id, patch = {}) {
             const found = entries.find((item) => item.id === id);
             if (!found || !patch || typeof patch !== 'object') return;
-            Object.assign(found, patch);
+            const { id: _id, timestamp: _ts, ...safePatch } = patch;
+            Object.assign(found, safePatch);
         },
 
         getLatest() {

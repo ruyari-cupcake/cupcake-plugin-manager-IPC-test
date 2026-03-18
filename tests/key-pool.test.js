@@ -102,15 +102,15 @@ describe('KeyPool', () => {
             expect(fetchFn).toHaveBeenCalledTimes(1);
         });
 
-        it('모든 키 소진 → 리셋 후 재시도, 최종 실패 → maxRetries 초과 메시지', async () => {
+        it('모든 키 소진 → 리셋 후 재시도, 최종 실패 → 리셋 횟수 초과 메시지', async () => {
             const pool = new KeyPool('key1');
             const fetchFn = vi.fn()
                 .mockResolvedValue({ success: false, _status: 429 });
 
-            const result = await pool.withRotation(fetchFn, { maxRetries: 3 });
+            const result = await pool.withRotation(fetchFn, { maxRetries: 10 });
             expect(result.success).toBe(false);
-            expect(result.content).toContain('최대 재시도');
-            // With reset-and-continue behavior, fetchFn is called once per attempt
+            expect(result.content).toContain('리셋');
+            // With maxResets=3, fetchFn called 3 times before reset limit hit
             expect(fetchFn).toHaveBeenCalledTimes(3);
         });
 
@@ -168,8 +168,10 @@ describe('KeyPool', () => {
         it('withRotation에서 모든 키 소진 시 자동 reset', async () => {
             const pool = new KeyPool('key1');
             const fetchFn = vi.fn().mockResolvedValue({ success: false, _status: 429 });
-            await pool.withRotation(fetchFn, { maxRetries: 3 });
-            // After exhaustion + reset, keys should be restored for future use
+            await pool.withRotation(fetchFn, { maxRetries: 10 });
+            // After maxResets exceeded, last drain leaves pool empty
+            // Manual reset() restores for future use
+            pool.reset();
             expect(pool.remaining).toBe(1);
         });
     });

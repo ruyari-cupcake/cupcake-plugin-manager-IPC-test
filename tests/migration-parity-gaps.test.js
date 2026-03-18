@@ -96,16 +96,16 @@ describe('GAP-3: KeyPool.withRotation — exhaustion recovery', () => {
         expect(callCount).toBe(3); // 2 failures + 1 success after reset
     });
 
-    it('still fails after maxRetries even with reset', async () => {
+    it('still fails after maxResets even with reset', async () => {
         const pool = new KeyPool('key1');
         let callCount = 0;
         const result = await pool.withRotation(async () => {
             callCount++;
             return { success: false, content: 'rate limited', _status: 429 };
-        }, { maxRetries: 5 });
+        }, { maxRetries: 10 });
 
         expect(result.success).toBe(false);
-        expect(callCount).toBe(5); // All retries used, all fail
+        expect(callCount).toBe(3); // maxResets=3 → stops after 3 reset cycles
     });
 });
 

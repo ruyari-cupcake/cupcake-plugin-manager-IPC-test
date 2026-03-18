@@ -64,6 +64,8 @@ export class KeyPool {
     async withRotation(fetchFn, opts = {}) {
         const maxRetries = opts.maxRetries || DEFAULT_MAX_RETRIES;
         const isRetryable = opts.isRetryable || ((r) => RETRYABLE_STATUS_CODES.includes(r._status));
+        let resetCount = 0;
+        const maxResets = 3;
 
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             const key = this.pick();
@@ -73,10 +75,12 @@ export class KeyPool {
             const rem = this.drain(key);
             console.warn(`[KeyPool]${this.name ? ' ' + this.name : ''} 🔄 키 교체 (HTTP ${result._status || '?'}, 남은 키: ${rem}개, 시도: ${attempt + 1})`);
             if (rem === 0) {
-                console.warn(`[KeyPool]${this.name ? ' ' + this.name + ':' : ''} ⚠️ 모든 키가 소진되었습니다. 원본 키 복원.`);
+                resetCount++;
+                if (resetCount >= maxResets) {
+                    return { success: false, content: `[KeyPool]${this.name ? ' ' + this.name + ':' : ''} 키 풀 리셋 ${maxResets}회 초과 — 서버가 모든 키를 거부 중` };
+                }
+                console.warn(`[KeyPool]${this.name ? ' ' + this.name + ':' : ''} ⚠️ 모든 키가 소진되었습니다. 원본 키 복원 (${resetCount}/${maxResets}).`);
                 this.reset();
-                // Don't return — reset() restores original keys so next pick() succeeds.
-                // The loop continues and pick() will return a fresh key.
             }
         }
         return { success: false, content: `[KeyPool] 최대 재시도 횟수(${maxRetries}) 초과` };

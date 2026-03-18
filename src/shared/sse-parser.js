@@ -47,24 +47,27 @@ export function createSSEStream(response, lineParser, abortSignal, onComplete) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let _completeCalled = false;
+    function callOnComplete() {
+        if (_completeCalled || typeof onComplete !== 'function') return null;
+        _completeCalled = true;
+        try { return onComplete(); } catch { return null; }
+    }
     return new ReadableStream({
         async pull(controller) {
             try {
                 while (true) {
                     if (abortSignal?.aborted) {
                         reader.cancel();
-                        // C-1 FIX: abort시에도 onComplete 호출 (thought 블록 닫기, 토큰 추적 등)
-                        if (typeof onComplete === 'function') {
-                            try { const extra = onComplete(); if (extra) controller.enqueue(extra); } catch {}
-                        }
+                        const extra = callOnComplete();
+                        if (extra) controller.enqueue(extra);
                         controller.close(); return;
                     }
                     const { done, value } = await reader.read();
                     if (done) {
                         if (buffer.trim()) { const d = lineParser(buffer.trim()); if (d) controller.enqueue(d); }
-                        if (typeof onComplete === 'function') {
-                            try { const extra = onComplete(); if (extra) controller.enqueue(extra); } catch {}
-                        }
+                        const extra = callOnComplete();
+                        if (extra) controller.enqueue(extra);
                         controller.close(); return;
                     }
                     buffer += decoder.decode(value, { stream: true });
@@ -78,19 +81,14 @@ export function createSSEStream(response, lineParser, abortSignal, onComplete) {
                     }
                 }
             } catch (e) {
-                // C-1 FIX: error시에도 onComplete 호출
-                if (typeof onComplete === 'function') {
-                    try { const extra = onComplete(); if (extra && e.name === 'AbortError') { /* skip enqueue on error */ } } catch {}
-                }
+                const extra = callOnComplete();
+                if (extra && e.name === 'AbortError') { /* skip enqueue on error */ }
                 if (e.name !== 'AbortError') controller.error(e);
                 else controller.close();
             }
         },
         cancel() {
-            // C-1 FIX: cancel시에도 onComplete 호출
-            if (typeof onComplete === 'function') {
-                try { onComplete(); } catch {}
-            }
+            callOnComplete();
             reader.cancel();
         }
     });

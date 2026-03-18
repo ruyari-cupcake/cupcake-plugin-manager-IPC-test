@@ -621,15 +621,16 @@ describe('getSubPluginToggleStates', () => {
 
 describe('checkVersionsQuiet — sub-plugin toggle filtering', () => {
     it('skips disabled sub-plugins during auto-update', async () => {
+        const risuFetchMock = vi.fn(async () => ({
+            data: JSON.stringify({
+                TestPlugin: { version: '1.0.0' },
+                SubAlpha: { version: '2.0.0', file: 'sub-alpha.js', sha256: 'abc123', changes: 'fix' },
+                SubBeta: { version: '3.0.0', file: 'sub-beta.js', sha256: 'def456', changes: 'feat' },
+            }),
+            status: 200,
+        }));
         const { updater, Risu, storage } = createUpdater({
-            risuFetch: vi.fn(async () => ({
-                data: JSON.stringify({
-                    TestPlugin: { version: '1.0.0' },
-                    SubAlpha: { version: '2.0.0', file: 'sub-alpha.js', sha256: 'abc123', changes: 'fix' },
-                    SubBeta: { version: '3.0.0', file: 'sub-beta.js', sha256: 'def456', changes: 'feat' },
-                }),
-                status: 200,
-            })),
+            risuFetch: risuFetchMock,
             getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? 'true' : ''),
         });
 
@@ -641,10 +642,61 @@ describe('checkVersionsQuiet — sub-plugin toggle filtering', () => {
         const subUpdates = updater.getSubPluginUpdates();
         // Both should be detected
         expect(subUpdates.length).toBe(2);
-        // But only SubBeta should have been processed (SubAlpha disabled)
-        // We can't easily check if runSequentialSubPluginUpdates was called with filtered list,
-        // but we know it was attempted — just verify the detection is separate from execution
         expect(subUpdates.find(u => u.name === 'SubAlpha')).toBeDefined();
         expect(subUpdates.find(u => u.name === 'SubBeta')).toBeDefined();
+
+        // Verify filtering via risuFetch call count:
+        // Call 1: manifest fetch (versionsUrl)
+        // Call 2: bundle fetch for SubBeta only (SubAlpha was disabled → skipped)
+        // If SubAlpha were not filtered, there would be 3 calls (manifest + 2 bundles)
+        expect(risuFetchMock).toHaveBeenCalledTimes(2);
+    }, 15000);
+
+    it('processes all sub-plugins when all toggles are enabled (default)', async () => {
+        const risuFetchMock = vi.fn(async () => ({
+            data: JSON.stringify({
+                TestPlugin: { version: '1.0.0' },
+                SubAlpha: { version: '2.0.0', file: 'sub-alpha.js', sha256: 'abc123', changes: 'fix' },
+                SubBeta: { version: '3.0.0', file: 'sub-beta.js', sha256: 'def456', changes: 'feat' },
+            }),
+            status: 200,
+        }));
+        const { updater } = createUpdater({
+            risuFetch: risuFetchMock,
+            getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? 'true' : ''),
+        });
+
+        // Don't disable anything — both should be processed
+        await updater.checkVersionsQuiet();
+
+        // Call 1: manifest, Call 2: SubAlpha bundle, Call 3: SubBeta bundle
+        expect(risuFetchMock).toHaveBeenCalledTimes(3);
+    }, 15000);
+
+    it('skips all sub-plugins when all toggles are disabled', async () => {
+        const risuFetchMock = vi.fn(async () => ({
+            data: JSON.stringify({
+                TestPlugin: { version: '1.0.0' },
+                SubAlpha: { version: '2.0.0', file: 'sub-alpha.js', sha256: 'abc123', changes: 'fix' },
+                SubBeta: { version: '3.0.0', file: 'sub-beta.js', sha256: 'def456', changes: 'feat' },
+            }),
+            status: 200,
+        }));
+        const { updater } = createUpdater({
+            risuFetch: risuFetchMock,
+            getArgument: vi.fn(async (key) => key === 'cpm_auto_update_enabled' ? 'true' : ''),
+        });
+
+        await updater.setSubPluginAutoUpdateEnabled('SubAlpha', false);
+        await updater.setSubPluginAutoUpdateEnabled('SubBeta', false);
+
+        await updater.checkVersionsQuiet();
+
+        // Only 1 call: manifest fetch. No bundle fetches since all disabled.
+        expect(risuFetchMock).toHaveBeenCalledTimes(1);
+
+        // But detection still works
+        const subUpdates = updater.getSubPluginUpdates();
+        expect(subUpdates.length).toBe(2);
     }, 15000);
 });
