@@ -2,8 +2,8 @@
 
 > RisuAI V3 Plugin Channel IPC 기반 AI 프로바이더 허브
 
-[![Tests](https://img.shields.io/badge/tests-3109%20passed-brightgreen)](#테스트)
-[![Coverage](https://img.shields.io/badge/branch%20coverage-90.7%25-brightgreen)](#커버리지)
+[![Tests](https://img.shields.io/badge/tests-3143%20passed-brightgreen)](#테스트)
+[![Coverage](https://img.shields.io/badge/branch%20coverage-91.5%25-brightgreen)](#커버리지)
 [![TypeScript](https://img.shields.io/badge/TS%20errors-0-blue)](#타입-체크)
 [![ESLint](https://img.shields.io/badge/ESLint-0%20errors-blue)](#린트--포맷)
 
@@ -64,11 +64,11 @@ npm run test:coverage
 
 | 모듈 | Stmts | Branch | Funcs | Lines |
 |---|---|---|---|---|
-| **All files** | 96.04% | **90.70%** | 97.18% | 97.68% |
+| **All files** | 96.54% | **91.46%** | 97.18% | 98.10% |
 | auto-updater.js | 98.07% | 91.33% | 100% | 98.20% |
 | message-format.js | 90.28% | 83.82% | 100% | 92.70% |
-| sse-parser.js | 97.15% | 90.02% | 100% | 97.71% |
-| helpers.js | 86.71% | 84.15% | 86.48% | 93.67% |
+| sse-parser.js | 98.89% | 90.02% | 100% | 100% |
+| helpers.js | 90.72% | 90.09% | 86.48% | 97.15% |
 
 ### 린트 & 포맷
 
@@ -134,7 +134,7 @@ src/
     ├── resizer.js            # 채팅 리사이저
     └── navigation.js         # 채팅 네비게이션
 
-tests/                        # Vitest 테스트 (70+ 파일, 3109 테스트)
+tests/                        # Vitest 테스트 (71 파일, 3143 테스트)
 ├── *.test.js                 # 유닛 테스트
 ├── *.integration.test.js     # 통합 테스트
 ├── coverage-*.test.js        # 커버리지 푸시 테스트
