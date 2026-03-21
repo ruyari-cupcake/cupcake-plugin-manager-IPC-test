@@ -54,7 +54,9 @@ export async function ensureCopilotApiToken(deps = {}) {
 
     _pendingTokenPromise = (async () => {
         const githubToken = await getArg(TOKEN_ARG_KEY);
-        const cleanToken = sanitizeCopilotToken(githubToken);
+        // Multi-token support: tokens are space-separated, use first valid one
+        const allTokens = String(githubToken || '').split(/\s+/).map(t => sanitizeCopilotToken(t)).filter(Boolean);
+        const cleanToken = allTokens[0] || '';
         if (!cleanToken) return '';
         const nodelessMode = normalizeCopilotNodelessMode(await getArg('cpm_copilot_nodeless_mode'));
 

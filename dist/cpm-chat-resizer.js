@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Chat Resizer
 //@display-name CPM Chat Resizer
-//@version 2.0.7
+//@version 2.0.8
 //@description Chat input textarea resizer (IPC)
 //@icon ↕️
 //@author Cupcake

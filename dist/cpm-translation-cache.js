@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Translation Cache
 //@display-name CPM Translation Cache
-//@version 2.0.7
+//@version 2.0.8
 //@description Translation cache manager with corrections (IPC)
 //@icon 💾
 //@author Cupcake

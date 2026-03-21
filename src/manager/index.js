@@ -56,7 +56,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.7';
+const CPM_VERSION = '2.0.8';
 const Risu = getRisu();
 
 // ==========================================
@@ -2531,34 +2531,45 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         ${providerContentHtml}
 
         <div id="tab-copilot" class="cpm-tab-content hidden">
-            <h3 class="text-3xl font-bold mb-6 pb-3 border-b border-gray-700">🔑 GitHub Copilot 토큰 관리</h3>
-            <p class="text-blue-300 font-semibold mb-6 border-l-4 border-blue-500 pl-4 py-1">
+            <h3 class="text-3xl font-bold text-blue-400 mb-6 pb-3 border-b border-gray-700">🔑 GitHub Copilot 토큰 관리자</h3>
+            <p class="text-blue-300 font-semibold mb-4 border-l-4 border-blue-500 pl-4 py-1">
                 GitHub Copilot OAuth 토큰을 생성·확인·제거하고, 사용 가능한 모델과 할당량을 조회합니다.
             </p>
-            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-4">
-                <label class="block text-sm font-medium text-gray-400 mb-2">현재 저장된 토큰</label>
-                <div class="flex items-center gap-2">
-                    <div class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-2 font-mono text-sm text-gray-300 truncate" id="cpm-copilot-token-display">로딩 중...</div>
-                    <button class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-semibold touch-manipulation" id="cpm-copilot-copy" title="토큰 복사">📋</button>
+            <div class="bg-blue-900/30 border border-blue-700/50 rounded-lg p-3 mb-6">
+                <p class="text-xs text-blue-300">🔄 <strong>자동 키 회전:</strong> 여러 토큰을 저장하면, API 호출 실패(401/429) 시 자동으로 다음 토큰으로 회전합니다. 각 토큰의 모델·할당량을 개별 조회할 수 있습니다.</p>
+            </div>
+
+            <!-- Token List -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-400 mb-2">저장된 토큰 (<span id="cpm-copilot-token-count">0</span>개) <span id="cpm-copilot-rotation-badge" class="text-green-400 text-xs ml-2 hidden">🔄 키 회전 활성</span></label>
+                <div id="cpm-copilot-token-list" class="space-y-2 mb-3 max-h-60 overflow-y-auto">
+                    <div class="text-gray-500 text-sm p-3 text-center">로딩 중...</div>
                 </div>
+                <button id="cpm-copilot-remove-all" class="text-xs text-red-400 hover:text-red-300 underline hidden">모든 토큰 제거</button>
             </div>
-            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-4">
-                <label class="block text-sm font-medium text-gray-400 mb-2">토큰 직접 입력</label>
-                <div class="flex items-center gap-2">
-                    <input type="text" id="cpm-copilot-manual" class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-blue-500" placeholder="ghu_xxxx 또는 gho_xxxx" spellcheck="false">
-                    <button class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-semibold touch-manipulation" id="cpm-copilot-save">💾 저장</button>
+
+            <!-- Add Token Input -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-400 mb-2">➕ 토큰 추가</label>
+                <div class="flex items-center space-x-2">
+                    <input id="cpm-copilot-add-input" type="text" placeholder="ghu_xxxx 또는 gho_xxxx 토큰을 붙여넣기..." class="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-gray-200 font-mono text-sm focus:border-blue-500 focus:outline-none" spellcheck="false">
+                    <button id="cpm-copilot-add-btn" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded text-sm font-bold shrink-0 touch-manipulation">➕ 추가</button>
                 </div>
-                <p class="text-xs text-gray-500 mt-2">GitHub에서 직접 발급받은 토큰을 수동으로 입력할 수 있습니다.</p>
+                <p class="text-gray-500 text-xs mt-1">여러 토큰을 추가하면 실패 시 자동으로 다음 토큰으로 회전합니다.</p>
             </div>
-            <div class="grid grid-cols-3 gap-3 mb-6">
-                <button id="cpm-copilot-gen" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">🔑</span><span>토큰 생성</span></button>
-                <button id="cpm-copilot-verify" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">✅</span><span>토큰 확인</span></button>
-                <button id="cpm-copilot-remove" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-red-700 hover:border-red-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">🗑️</span><span>토큰 제거</span></button>
-                <button id="cpm-copilot-models" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">📋</span><span>모델 목록</span></button>
-                <button id="cpm-copilot-quota" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">📊</span><span>할당량</span></button>
-                <button id="cpm-copilot-info" class="flex flex-col items-center justify-center p-4 bg-gray-800 border border-gray-700 rounded-lg hover:bg-blue-700 hover:border-blue-500 text-gray-300 transition-colors text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">ℹ️</span><span>설정 안내</span></button>
+
+            <!-- Action Buttons Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+                <button id="cpm-copilot-gen" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-blue-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">🔑</span><span>토큰 생성</span></button>
+                <button id="cpm-copilot-verify" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-blue-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">✅</span><span>토큰 확인</span></button>
+                <button id="cpm-copilot-remove" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-red-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">🗑️</span><span>토큰 제거</span></button>
+                <button id="cpm-copilot-models" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-blue-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">📋</span><span>모델 목록</span></button>
+                <button id="cpm-copilot-quota" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-blue-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">📊</span><span>할당량 확인</span></button>
+                <button id="cpm-copilot-autoconfig" class="w-full flex flex-col items-center justify-center p-4 rounded-lg bg-gray-800 hover:bg-blue-600 text-gray-200 transition-colors border border-gray-700 cursor-pointer text-sm font-medium touch-manipulation"><span class="text-2xl mb-1">⚙️</span><span>자동 설정</span></button>
             </div>
-            <div id="cpm-copilot-result" class="hidden"></div>
+
+            <!-- Result Container -->
+            <div id="cpm-copilot-result" class="hidden space-y-3"></div>
         </div>
 
         <div id="tab-subplugins" class="cpm-tab-content hidden">
@@ -3696,131 +3707,131 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     void _renderSubPluginTogglePanel();
     document.getElementById('cpm-subplugin-refresh')?.addEventListener('click', () => _renderSubPluginTogglePanel());
 
-    // ─── COPILOT TOKEN MANAGEMENT UI ───
+    // ─── COPILOT TOKEN MANAGEMENT UI (Multi-Token) ───
     const _copilotResultEl = document.getElementById('cpm-copilot-result');
     const _copilotShowResult = (html) => { _copilotResultEl.classList.remove('hidden'); _copilotResultEl.innerHTML = html; _copilotResultEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); };
     const _copilotShowLoading = (msg = '처리 중...') => _copilotShowResult(`<div class="bg-gray-800 border border-gray-700 rounded-lg p-6 text-center"><div class="text-2xl mb-2">⏳</div><div class="text-gray-400">${msg}</div></div>`);
     const _copilotShowError = (msg) => _copilotShowResult(`<div class="bg-red-950 border border-red-800 rounded-lg p-4 text-red-300"><strong>❌ 오류:</strong> ${escAttr(msg)}</div>`);
     const _copilotShowSuccess = (html) => _copilotShowResult(`<div class="bg-green-950 border border-green-800 rounded-lg p-4 text-green-300">${html}</div>`);
-    const _copilotRefreshDisplay = async () => {
-        const el = document.getElementById('cpm-copilot-token-display');
-        if (el) el.textContent = _maskToken(await _getCopilotToken());
-    };
-    const _copilotFormatResetDate = (value) => {
-        if (!value) return '';
-        const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? escAttr(value) : date.toLocaleString('ko-KR');
-    };
-    const _copilotQuotaLabel = (item) => String(item?.name || item?.type || item?.key || 'quota').replace(/_/g, ' ');
-    const _copilotRenderQuotaResult = (q) => {
-        const planLabels = { copilot_for_individuals_subscriber: 'Copilot Individual', copilot_for_individuals_pro_subscriber: 'Copilot Pro', plus_monthly_subscriber_quota: 'Copilot Pro+ (월간)', plus_yearly_subscriber_quota: 'Copilot Pro+ (연간)' };
-        let html = `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-blue-400 mb-2">📊 구독 플랜</h4><div class="bg-gray-900 rounded p-3 text-sm space-y-1"><div><strong>플랜:</strong> ${escAttr(planLabels[q.plan] || q.plan)}</div><div class="text-gray-500 text-xs">SKU: ${escAttr(q.plan || 'unknown')}</div></div></div>`;
 
-        if (q.proxyCacheWarning) {
-            html += `<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 mb-3 text-yellow-200 text-sm"><div class="font-bold text-yellow-300 mb-1">⚠️ 프록시 캐시 경고</div><div>/copilot_internal/user 응답이 토큰 엔드포인트 형태로 반환되었습니다. 프록시 캐시 영향으로 할당량 정보가 누락될 수 있습니다.</div></div>`;
-        }
+    // Multi-token helpers (from copilot.js via window)
+    const _copilotGetTokens = () => typeof window._cpmCopilotGetTokens === 'function' ? window._cpmCopilotGetTokens() : _getCopilotToken().then(t => t ? [t] : []);
+    const _copilotAddToken = (t) => typeof window._cpmCopilotAddToken === 'function' ? window._cpmCopilotAddToken(t) : _setCopilotToken(t).then(() => true);
+    const _copilotRemoveTokenAt = (i) => typeof window._cpmCopilotRemoveTokenAt === 'function' ? window._cpmCopilotRemoveTokenAt(i) : Promise.resolve();
+    const _copilotSetTokens = (arr) => { if (typeof window._cpmCopilotSetTokens === 'function') window._cpmCopilotSetTokens(arr); else _setCopilotToken(arr.join(' ')); };
+    const _copilotCheckStatus = (token, idx) => typeof window._cpmCopilotCheckStatus === 'function' ? window._cpmCopilotCheckStatus(token, idx) : Promise.resolve(null);
+    const _copilotStatusCache = () => (typeof window._cpmCopilotStatusCache !== 'undefined' && window._cpmCopilotStatusCache) ? window._cpmCopilotStatusCache : new Map();
 
-        const snap = q.quota_snapshots;
-        const hasOldQuota = !!snap;
-        const hasNewQuota = !!q.limited_user_quotas;
-        if (hasOldQuota) {
-            if (snap.premium_interactions) {
-                const pi = snap.premium_interactions;
-                const rem = pi.remaining ?? 0;
-                const ent = pi.entitlement ?? 0;
-                const used = ent - rem;
-                const pct = pi.percent_remaining ?? (ent > 0 ? rem / ent * 100 : 0);
-                const clr = pct > 70 ? 'green' : pct > 30 ? 'yellow' : 'red';
-                html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-blue-400 mb-2">🎯 프리미엄 요청 할당량</h4><div class="bg-gray-900 rounded p-3 text-sm text-gray-300"><div class="mb-2 flex items-baseline justify-between"><span><strong>남은 요청:</strong></span><span class="text-${clr}-400 text-xl font-bold">${rem} <span class="text-gray-500 text-xs">/ ${ent}</span></span></div><div class="bg-gray-700 rounded-full h-3 overflow-hidden mb-2"><div class="bg-${clr}-500 h-full rounded-full transition-all" style="width:${Math.min(pct, 100)}%"></div></div><div class="flex justify-between text-xs text-gray-500"><span>사용: ${used}회</span><span>${pct.toFixed(1)}% 남음</span></div>${pi.unlimited ? '<div class="text-green-400 text-xs mt-1 font-bold">♾️ 무제한</div>' : ''}<div class="text-gray-500 text-xs mt-1">초과 허용: ${pi.overage_permitted ? '허용' : '비허용'}</div>${pi.reset_date ? `<div class="text-gray-500 text-xs">리셋: ${_copilotFormatResetDate(pi.reset_date)}</div>` : ''}</div></div>`;
-            }
-
-            const otherQuotas = Object.entries(snap).filter(([key]) => key !== 'premium_interactions');
-            if (otherQuotas.length > 0) {
-                let itemsHtml = '';
-                for (const [key, quota] of otherQuotas) {
-                    const label = String(key).replace(/_/g, ' ');
-                    if (quota?.unlimited) {
-                        itemsHtml += `<div class="flex items-center justify-between py-2 border-b border-gray-800 last:border-0"><span class="capitalize text-xs text-gray-300">${escAttr(label)}</span><span class="text-green-400 text-xs font-bold">♾️ 무제한</span></div>`;
-                    } else {
-                        const rem = quota?.remaining ?? 0;
-                        const ent = quota?.entitlement ?? 0;
-                        const pct = quota?.percent_remaining ?? (ent > 0 ? rem / ent * 100 : 0);
-                        const clr = pct > 70 ? 'green' : pct > 30 ? 'yellow' : 'red';
-                        itemsHtml += `<div class="py-2 border-b border-gray-800 last:border-0"><div class="flex justify-between text-xs mb-1"><span class="capitalize text-gray-300">${escAttr(label)}</span><span class="text-${clr}-400">${rem} / ${ent}</span></div><div class="bg-gray-700 rounded-full h-1.5 overflow-hidden"><div class="bg-${clr}-500 h-full rounded-full" style="width:${Math.min(pct, 100)}%"></div></div></div>`;
-                    }
-                }
-                html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-blue-400 mb-2">📋 기타 할당량</h4><div class="bg-gray-900 rounded p-3">${itemsHtml}</div></div>`;
-            }
-        } else if (hasNewQuota) {
-            const resetDate = q.limited_user_reset_date;
-            const luq = q.limited_user_quotas;
-            const arr = Array.isArray(luq) ? luq : (typeof luq === 'object' && luq !== null ? Object.entries(luq).map(([k, v]) => ({ name: k, ...(typeof v === 'object' ? v : { value: v }) })) : []);
-            if (arr.length > 0) {
-                let itemsHtml = '';
-                for (const it of arr) {
-                    const label = _copilotQuotaLabel(it);
-                    const limit = it.limit ?? it.entitlement ?? it.total ?? it.monthly ?? null;
-                    const used = it.used ?? it.consumed ?? (limit != null && it.remaining != null ? limit - it.remaining : null);
-                    const rem = it.remaining ?? (limit != null && used != null ? limit - used : null);
-                    if (it.unlimited === true && !limit) {
-                        itemsHtml += `<div class="flex items-center justify-between py-2 border-b border-gray-800 last:border-0"><span class="capitalize text-xs text-gray-300">${escAttr(label)}</span><span class="text-green-400 text-xs font-bold">♾️ 무제한</span></div>`;
-                    } else if (limit != null) {
-                        const pctRemain = limit > 0 ? (((rem ?? 0) / limit) * 100) : 0;
-                        const clr = pctRemain > 70 ? 'green' : pctRemain > 30 ? 'yellow' : 'red';
-                        itemsHtml += `<div class="py-2 border-b border-gray-800 last:border-0"><div class="flex justify-between text-xs mb-1"><span class="capitalize text-gray-300">${escAttr(label)}</span><span class="text-${clr}-400">${rem ?? (limit - (used ?? 0))} / ${limit}</span></div><div class="bg-gray-700 rounded-full h-2 overflow-hidden"><div class="bg-${clr}-500 h-full rounded-full" style="width:${Math.min(Math.max(pctRemain, 0), 100)}%"></div></div></div>`;
-                    } else {
-                        itemsHtml += `<div class="py-2 border-b border-gray-800 last:border-0 text-xs text-gray-400"><span class="capitalize text-gray-300">${escAttr(label)}:</span> <span class="font-mono">${escAttr(JSON.stringify(it))}</span></div>`;
-                    }
-                }
-                html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-blue-400 mb-2">🎯 할당량 (Limited User Quotas)</h4><div class="bg-gray-900 rounded p-3">${itemsHtml}</div>${resetDate ? `<div class="text-gray-500 text-xs mt-2">리셋: ${_copilotFormatResetDate(resetDate)}</div>` : ''}</div>`;
+    function _buildTokenListHtml(tokens, statuses) {
+        if (tokens.length === 0) return '<div class="text-gray-500 text-sm p-3 text-center">저장된 토큰이 없습니다. 아래에서 토큰을 생성하거나 직접 입력하세요.</div>';
+        let html = '';
+        for (let i = 0; i < tokens.length; i++) {
+            const t = tokens[i];
+            const masked = t.length > 16 ? t.substring(0, 6) + '\u2022\u2022\u2022\u2022' + t.substring(t.length - 4) : t;
+            const status = statuses[i];
+            const isActive = status ? status.active : false;
+            const isFirst = i === 0;
+            const borderClass = isActive ? 'bg-green-900/20 border border-green-700/50' : (isFirst ? 'bg-blue-900/30 border border-blue-700/50' : 'bg-gray-800/50 border border-gray-700/50');
+            let badge = '';
+            if (status) {
+                if (status.sku === 'error') badge = '<span class="text-[10px] bg-red-700 text-white px-1.5 py-0.5 rounded font-bold">만료/오류</span>';
+                else if (isActive) badge = `<span class="text-[10px] bg-green-600 text-white px-1.5 py-0.5 rounded font-bold">활성 ${escAttr(status.planLabel || '')}</span>`;
+                else badge = `<span class="text-[10px] bg-gray-600 text-white px-1.5 py-0.5 rounded font-bold">비활성 (${escAttr(status.sku || '?')})</span>`;
             } else {
-                html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-blue-400 mb-2">🎯 할당량 (Raw)</h4><pre class="bg-gray-900 rounded p-3 font-mono text-xs text-gray-500 max-h-64 overflow-auto whitespace-pre-wrap break-all">${escAttr(JSON.stringify(luq, null, 2))}</pre>${resetDate ? `<div class="text-gray-500 text-xs mt-2">리셋: ${_copilotFormatResetDate(resetDate)}</div>` : ''}</div>`;
+                badge = '<span class="text-[10px] bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded">미확인</span>';
             }
-        } else {
-            html += `<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 mb-3 text-yellow-200 text-sm"><h4 class="font-bold text-yellow-300 mb-2">⚠️ 할당량 정보 없음</h4><p class="mb-1">Copilot 할당량 정보를 가져오지 못했습니다.</p><p class="text-yellow-400 text-xs">이 플랜에서 할당량 API를 지원하지 않거나 토큰 권한이 부족할 수 있습니다. <a href="https://github.com/settings/copilot" target="_blank" class="text-blue-400 underline">GitHub 설정</a>에서 확인하세요.</p></div>`;
+            html += `<div class="flex items-center gap-2 p-2 rounded ${borderClass}">
+                <span class="text-xs font-bold ${isActive ? 'text-green-400' : (isFirst ? 'text-blue-400' : 'text-gray-500')} w-6 text-center">#${i + 1}</span>
+                <span class="flex-1 font-mono text-xs ${isActive ? 'text-green-300' : (isFirst ? 'text-blue-300' : 'text-gray-400')} truncate">${escAttr(masked)}</span>
+                ${badge}
+                <button data-copilot-action="tokenCopy" data-token-idx="${i}" class="text-xs text-gray-400 hover:text-white px-1.5 py-0.5 rounded bg-gray-700 hover:bg-gray-600" title="복사">📋</button>
+                <button data-copilot-action="tokenModels" data-token-idx="${i}" class="text-xs text-gray-400 hover:text-white px-1.5 py-0.5 rounded bg-gray-700 hover:bg-gray-600" title="모델 조회">🔍</button>
+                <button data-copilot-action="tokenRemove" data-token-idx="${i}" class="text-xs text-red-400 hover:text-red-200 px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-700" title="제거">🗑️</button>
+            </div>`;
         }
-
-        if (q.token_meta && Object.keys(q.token_meta).length > 0) {
-            const boolFeatures = [];
-            const otherFields = {};
-            for (const [k, v] of Object.entries(q.token_meta)) {
-                if (typeof v === 'boolean') boolFeatures.push({ key: k, enabled: v });
-                else if (k === 'expires_at') otherFields[k] = new Date(v * 1000).toLocaleString('ko-KR');
-                else if (k === 'refresh_in') otherFields[k] = `${v}초`;
-                else otherFields[k] = v;
-            }
-            let detailsHtml = '';
-            if (boolFeatures.length > 0) {
-                detailsHtml += `<div class="grid grid-cols-2 gap-1 mb-2">${boolFeatures.map((feature) => `<div class="text-xs"><span class="${feature.enabled ? 'text-green-400' : 'text-gray-600'}">${feature.enabled ? '✅' : '❌'}</span> ${escAttr(feature.key)}</div>`).join('')}</div>`;
-            }
-            if (Object.keys(otherFields).length > 0) {
-                detailsHtml += `<pre class="text-xs text-gray-400 font-mono whitespace-pre-wrap mt-2">${escAttr(JSON.stringify(otherFields, null, 2))}</pre>`;
-            }
-            html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden mb-3"><summary class="cursor-pointer p-4 font-semibold text-gray-300 text-sm">🔧 토큰 기능 상세</summary><div class="px-4 pb-4">${detailsHtml}</div></details>`;
-        }
-
-        if (q.copilot_user) {
-            html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden"><summary class="cursor-pointer p-4 font-semibold text-gray-300 text-sm">🔍 API 원본 응답</summary><pre class="px-4 pb-4 font-mono text-xs text-gray-500 max-h-64 overflow-auto whitespace-pre-wrap break-all">${escAttr(JSON.stringify(q.copilot_user, null, 2))}</pre></details>`;
-        }
-
         return html;
-    };
-    _copilotRefreshDisplay();
+    }
 
-    document.getElementById('cpm-copilot-copy').addEventListener('click', async () => {
-        const t = await _getCopilotToken();
-        if (!t) { alert('토큰 없음'); return; }
-        try { await navigator.clipboard.writeText(t); } catch { const ta = document.createElement('textarea'); ta.value = t; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
-        alert('토큰이 복사되었습니다.');
+    async function _refreshCopilotTokenList() {
+        const container = document.getElementById('cpm-copilot-token-list');
+        if (!container) return;
+        const tokens = await _copilotGetTokens();
+        const countEl = document.getElementById('cpm-copilot-token-count');
+        if (countEl) countEl.textContent = String(tokens.length);
+        const rotBadge = document.getElementById('cpm-copilot-rotation-badge');
+        if (rotBadge) rotBadge.classList.toggle('hidden', tokens.length <= 1);
+        const removeAllBtn = document.getElementById('cpm-copilot-remove-all');
+        if (removeAllBtn) removeAllBtn.classList.toggle('hidden', tokens.length <= 1);
+        if (tokens.length === 0) {
+            container.innerHTML = '<div class="text-gray-500 text-sm p-3 text-center">저장된 토큰이 없습니다.</div>';
+            return;
+        }
+        // Render with cached statuses first
+        const cache = _copilotStatusCache();
+        const cachedStatuses = tokens.map(t => cache.get ? cache.get(t) : null);
+        container.innerHTML = _buildTokenListHtml(tokens, cachedStatuses);
+        // Async live check
+        const results = await Promise.allSettled(tokens.map((t, i) => _copilotCheckStatus(t, i + 1)));
+        const statuses = results.map(r => r.status === 'fulfilled' ? r.value : null);
+        const again = document.getElementById('cpm-copilot-token-list');
+        if (again) again.innerHTML = _buildTokenListHtml(tokens, statuses);
+    }
+    window._cpmCopilotRefreshTokens = _refreshCopilotTokenList;
+
+    // Event delegation for per-token actions
+    document.addEventListener('click', (e) => {
+        const btn = /** @type {HTMLElement} */ (e.target)?.closest?.('[data-copilot-action]');
+        if (!btn) return;
+        const action = btn.dataset.copilotAction;
+        const idx = parseInt(btn.dataset.tokenIdx);
+        if (isNaN(idx)) return;
+        if (action === 'tokenCopy') {
+            _copilotGetTokens().then(tokens => {
+                if (!tokens[idx]) return;
+                (async () => { try { await navigator.clipboard.writeText(tokens[idx]); } catch { const ta = document.createElement('textarea'); ta.value = tokens[idx]; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } })();
+                alert('토큰이 복사되었습니다.');
+            });
+        } else if (action === 'tokenModels') {
+            (async () => {
+                const tokens = await _copilotGetTokens();
+                const token = tokens[idx]; if (!token) return;
+                _copilotShowLoading(`토큰 #${idx + 1} 모델 조회 중...`);
+                try {
+                    const d = await _copilotFetchModelList(token);
+                    const ids = (d.data || []).map(m => m.id);
+                    _copilotShowResult(`<div class="bg-gray-800 border border-gray-700 rounded-lg p-4"><h4 class="font-bold text-white mb-3">📋 토큰 #${idx + 1} 모델 목록 (${ids.length}개)</h4><div class="bg-gray-900 rounded p-3 font-mono text-xs max-h-80 overflow-y-auto space-y-1">${ids.map(id => `<div class="py-1 px-2 bg-gray-800 rounded">${escAttr(id)}</div>`).join('')}</div></div>`);
+                } catch (err) { _copilotShowError(err.message); }
+            })();
+        } else if (action === 'tokenRemove') {
+            if (!confirm(`토큰 #${idx + 1}을 제거하시겠습니까?`)) return;
+            _copilotRemoveTokenAt(idx).then(() => { _refreshCopilotTokenList(); _copilotShowSuccess(`<strong>✅</strong> 토큰 #${idx + 1}이 제거되었습니다.`); });
+        }
     });
-    document.getElementById('cpm-copilot-save').addEventListener('click', async () => {
-        const inp = /** @type {HTMLInputElement} */ (document.getElementById('cpm-copilot-manual'));
+
+    // Initialize token list on render
+    _refreshCopilotTokenList();
+
+    // Add token
+    document.getElementById('cpm-copilot-add-btn')?.addEventListener('click', async () => {
+        const inp = /** @type {HTMLInputElement} */ (document.getElementById('cpm-copilot-add-input'));
         if (!inp || !inp.value.trim()) { alert('토큰을 입력하세요.'); return; }
-        _setCopilotToken(inp.value.trim()); inp.value = '';
-        await _copilotRefreshDisplay();
-        _copilotShowSuccess('<strong>✅</strong> 직접 입력한 토큰이 저장되었습니다.');
+        const added = await _copilotAddToken(inp.value.trim());
+        inp.value = '';
+        _refreshCopilotTokenList();
+        if (added) _copilotShowSuccess('<strong>✅</strong> 토큰이 추가되었습니다.');
+        else alert('동일한 토큰이 이미 존재합니다.');
     });
-    document.getElementById('cpm-copilot-gen').addEventListener('click', async () => {
+
+    // Remove all tokens
+    document.getElementById('cpm-copilot-remove-all')?.addEventListener('click', async () => {
+        if (!confirm('정말로 모든 토큰을 제거하시겠습니까?')) return;
+        _copilotSetTokens([]);
+        _refreshCopilotTokenList();
+        _copilotShowResult(`<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 text-yellow-300"><strong>🗑️ 모든 토큰이 제거되었습니다.</strong></div>`);
+    });
+
+    // Generate token (device code flow → addToken)
+    document.getElementById('cpm-copilot-gen')?.addEventListener('click', async () => {
         try {
             _copilotShowLoading('GitHub 디바이스 코드 요청 중...');
             const dc = await _copilotRequestDeviceCode();
@@ -3848,13 +3859,18 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 mConfirmBtn.disabled = true; mConfirmBtn.textContent = '확인 중...';
                 try {
                     const at = await _copilotExchangeAccessToken(dc.device_code);
-                    _setCopilotToken(at); overlay.remove(); await _copilotRefreshDisplay();
-                    _copilotShowSuccess('<strong>✅ 성공!</strong> 토큰이 생성 및 저장되었습니다.');
+                    const added = await _copilotAddToken(at);
+                    overlay.remove();
+                    _refreshCopilotTokenList();
+                    if (added) _copilotShowSuccess('<strong>✅ 성공!</strong> 토큰이 생성되고 저장되었습니다.');
+                    else _copilotShowResult('<div class="bg-yellow-800/50 border border-yellow-600 rounded-lg p-4 text-yellow-300"><strong>⚠️ 중복 토큰.</strong> 이미 동일한 토큰이 등록되어 있습니다.</div>');
                 } catch (e) { mConfirmBtn.disabled = false; mConfirmBtn.textContent = '확인'; alert(e.message); }
             };
         } catch (e) { _copilotShowError(e.message); }
     });
-    document.getElementById('cpm-copilot-verify').addEventListener('click', async () => {
+
+    // Verify first token
+    document.getElementById('cpm-copilot-verify')?.addEventListener('click', async () => {
         const t = await _getCopilotToken();
         if (!t) { _copilotShowError('토큰 없음. 먼저 생성하세요.'); return; }
         _copilotShowLoading('토큰 상태 확인 중...');
@@ -3874,14 +3890,19 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             _copilotShowResult(html);
         } catch (e) { _copilotShowError(e.message); }
     });
-    document.getElementById('cpm-copilot-remove').addEventListener('click', async () => {
-        const t = await _getCopilotToken();
-        if (!t) { alert('이미 토큰 없음'); return; }
-        if (!confirm('토큰을 제거하시겠습니까?')) return;
-        _setCopilotToken(''); await _copilotRefreshDisplay();
-        _copilotShowResult(`<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 text-yellow-300"><strong>🗑️ 토큰 제거 완료.</strong></div>`);
+
+    // Remove all tokens (button)
+    document.getElementById('cpm-copilot-remove')?.addEventListener('click', async () => {
+        const tokens = await _copilotGetTokens();
+        if (tokens.length === 0) { alert('이미 토큰 없음'); return; }
+        if (!confirm(`정말로 저장된 Copilot 토큰 ${tokens.length}개를 모두 제거하시겠습니까?`)) return;
+        _copilotSetTokens([]);
+        _refreshCopilotTokenList();
+        _copilotShowResult(`<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 text-yellow-300"><strong>🗑️ 모든 토큰이 제거되었습니다.</strong></div>`);
     });
-    document.getElementById('cpm-copilot-models').addEventListener('click', async () => {
+
+    // Models (first token)
+    document.getElementById('cpm-copilot-models')?.addEventListener('click', async () => {
         const t = await _getCopilotToken();
         if (!t) { _copilotShowError('토큰 없음'); return; }
         _copilotShowLoading('모델 목록 조회 중...');
@@ -3893,20 +3914,69 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <details class="bg-gray-800 border border-gray-700 rounded-lg"><summary class="cursor-pointer p-4 font-semibold text-gray-300 text-sm">원본 JSON</summary><pre class="px-4 pb-4 font-mono text-xs text-gray-500 max-h-64 overflow-auto whitespace-pre-wrap break-all">${escAttr(JSON.stringify(d, null, 2))}</pre></details>`);
         } catch (e) { _copilotShowError(e.message); }
     });
-    document.getElementById('cpm-copilot-quota').addEventListener('click', async () => {
-        const t = await _getCopilotToken();
-        if (!t) { _copilotShowError('토큰 없음'); return; }
-        _copilotShowLoading('할당량 조회 중...');
+
+    // Quota — all tokens parallel
+    document.getElementById('cpm-copilot-quota')?.addEventListener('click', async () => {
+        const tokens = await _copilotGetTokens();
+        if (tokens.length === 0) { _copilotShowError('저장된 토큰이 없습니다. 먼저 토큰을 생성하세요.'); return; }
+        _copilotShowLoading('모든 토큰 할당량 조회 중...');
         try {
-            const q = await _copilotCheckQuota(t);
-            _copilotShowResult(_copilotRenderQuotaResult(q));
+            const quotaResults = await Promise.allSettled(tokens.map(t => _copilotCheckQuota(t)));
+            const planLabels = { copilot_for_individuals_subscriber: 'Copilot Individual', copilot_for_individuals_pro_subscriber: 'Copilot Pro', plus_monthly_subscriber_quota: 'Copilot Pro+ (월간)', plus_yearly_subscriber_quota: 'Copilot Pro+ (연간)' };
+            let fullHtml = '';
+            for (let ti = 0; ti < tokens.length; ti++) {
+                const result = quotaResults[ti];
+                if (result.status !== 'fulfilled') {
+                    fullHtml += `<div class="bg-red-950 border border-red-800 rounded-lg p-4 mb-3"><h4 class="text-red-300 font-bold mb-1">🔑 토큰 #${ti + 1}</h4><div class="text-red-400 text-xs">${escAttr(result.reason?.message || '조회 실패')}</div></div>`;
+                    continue;
+                }
+                const q = result.value;
+                const cache = _copilotStatusCache();
+                const statusInfo = cache.get ? cache.get(tokens[ti]) : null;
+                const isActive = statusInfo?.active;
+                const headerColor = isActive ? 'text-green-400' : 'text-gray-400';
+                const planDisplay = planLabels[q.plan] || q.plan;
+                let html = `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="text-white font-bold mb-3"><span class="${headerColor}">🔑 토큰 #${ti + 1}</span> ${isActive ? '<span class="text-[10px] bg-green-600 text-white px-1.5 py-0.5 rounded font-bold ml-2">활성</span>' : ''} — 📊 ${escAttr(planDisplay || '?')}</h4><div class="bg-gray-900 rounded p-3 text-sm"><div class="mb-1"><strong>플랜:</strong> ${escAttr(planDisplay || '?')}</div></div></div>`;
+                const snap = q.quota_snapshots;
+                if (snap?.premium_interactions) {
+                    const pi = snap.premium_interactions;
+                    const rem = pi.remaining ?? 0, ent = pi.entitlement ?? 0, used = ent - rem;
+                    const pct = pi.percent_remaining ?? (ent > 0 ? rem / ent * 100 : 0);
+                    const clr = pct > 70 ? 'green' : pct > 30 ? 'yellow' : 'red';
+                    html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-white mb-3">🎯 프리미엄 요청 할당량</h4><div class="bg-gray-900 rounded p-3 text-sm text-gray-300"><div class="mb-2 flex items-baseline justify-between"><span><strong>남은 요청:</strong></span><span class="text-${clr}-400 text-xl font-bold">${rem} <span class="text-gray-500 text-xs">/ ${ent}</span></span></div><div class="bg-gray-700 rounded-full h-3 overflow-hidden mb-2"><div class="bg-${clr}-500 h-full rounded-full" style="width:${Math.min(pct, 100)}%"></div></div><div class="flex justify-between text-xs text-gray-500"><span>사용: ${used}회</span><span>${pct.toFixed(1)}% 남음</span></div>${pi.reset_date ? `<div class="text-gray-500 text-xs mt-1">리셋: ${new Date(pi.reset_date).toLocaleString('ko-KR')}</div>` : ''}</div></div>`;
+                } else if (q.limited_user_quotas) {
+                    const luq = q.limited_user_quotas;
+                    const arr = Array.isArray(luq) ? luq : (typeof luq === 'object' && luq !== null ? Object.entries(luq).map(([k, v]) => ({ name: k, ...(typeof v === 'object' ? v : { value: v }) })) : []);
+                    if (arr.length > 0) {
+                        let lhtml = '';
+                        for (const it of arr) {
+                            const label = String(it.name || it.type || it.key || 'quota').replace(/_/g, ' ');
+                            const limit = it.limit ?? it.entitlement ?? null;
+                            const remaining = it.remaining ?? null;
+                            if (limit != null && remaining != null) {
+                                const pctR = limit > 0 ? remaining / limit * 100 : 0;
+                                const clr2 = pctR > 70 ? 'green' : pctR > 30 ? 'yellow' : 'red';
+                                lhtml += `<div class="py-1"><div class="flex justify-between text-xs"><span class="capitalize text-gray-300">${escAttr(label)}</span><span class="text-${clr2}-400">${remaining}/${limit}</span></div><div class="bg-gray-700 rounded-full h-1.5 mt-1"><div class="bg-${clr2}-500 h-full rounded-full" style="width:${Math.min(pctR, 100)}%"></div></div></div>`;
+                            }
+                        }
+                        html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3"><h4 class="font-bold text-white mb-3">🎯 할당량</h4><div class="bg-gray-900 rounded p-3">${lhtml}</div>${q.limited_user_reset_date ? `<div class="text-gray-500 text-xs mt-2">리셋: ${new Date(q.limited_user_reset_date).toLocaleString('ko-KR')}</div>` : ''}</div>`;
+                    }
+                } else {
+                    html += `<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 mb-3 text-yellow-300 text-sm">⚠️ 할당량 정보 없음</div>`;
+                }
+                if (q.copilot_user) { html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden mb-3"><summary class="cursor-pointer p-4 text-gray-400 font-bold text-sm">🔍 토큰 #${ti + 1} API 원본 응답</summary><pre class="px-4 pb-4 font-mono text-[11px] text-gray-500 max-h-72 overflow-auto whitespace-pre-wrap break-all">${escAttr(JSON.stringify(q.copilot_user, null, 2))}</pre></details>`; }
+                fullHtml += html;
+            }
+            _copilotShowResult(fullHtml || '<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 text-yellow-300">할당량 정보를 가져올 수 없습니다.</div>');
         } catch (e) { _copilotShowError(e.message); }
     });
-    document.getElementById('cpm-copilot-info').addEventListener('click', () => {
+
+    // Auto-config info
+    document.getElementById('cpm-copilot-autoconfig')?.addEventListener('click', () => {
         _copilotShowResult(`<div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
-            <h4 class="font-bold text-blue-400 mb-3">ℹ️ Copilot 커스텀 모델 설정 안내</h4>
+            <h4 class="font-bold text-blue-400 mb-3">⚙️ Copilot 커스텀 모델 설정 안내</h4>
             <div class="bg-gray-900 rounded p-4 text-sm space-y-2 leading-relaxed">
-                <p>이 탭에서 토큰을 생성한 후, <strong>Custom Models Manager</strong> 탭에서 커스텀 모델을 추가하세요:</p>
+                <p><strong>Custom Models Manager</strong> 탭에서 커스텀 모델을 추가하세요:</p>
                 <div class="bg-gray-800 border border-gray-600 rounded p-3 font-mono text-xs space-y-1">
                     <div><strong>이름:</strong> 🤖 Copilot GPT-4.1</div>
                     <div><strong>URL:</strong> https://api.githubcopilot.com/chat/completions</div>
@@ -3915,6 +3985,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     <div><strong>포맷:</strong> openai</div>
                 </div>
                 <p class="text-yellow-400 text-xs">💡 Copilot URL이 감지되면 자동으로 토큰이 교환·설정됩니다. API Key를 비워두세요.</p>
+                <p class="text-gray-400 text-xs">⚠️ Claude, o3, o4-mini 등 다른 Copilot 모델도 동일한 URL로 추가할 수 있습니다. 모델명만 변경하세요.</p>
             </div>
         </div>`);
     });

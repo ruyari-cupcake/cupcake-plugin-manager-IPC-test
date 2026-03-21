@@ -28,9 +28,121 @@ function sanitizeHeaders(headers) {
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; }
 
 async function getToken() {
-    try { const raw = await Risu.getArgument(TOKEN_ARG_KEY); return sanitizeToken(raw || ''); } catch { return ''; }
+    try {
+        const raw = await Risu.getArgument(TOKEN_ARG_KEY);
+        // Multi-token: space-separated, return first valid
+        const tokens = String(raw || '').split(/\s+/).map(t => sanitizeToken(t)).filter(Boolean);
+        return tokens[0] || '';
+    } catch { return ''; }
+}
+/** Get all stored tokens as array */
+async function getTokens() {
+    try {
+        const raw = await Risu.getArgument(TOKEN_ARG_KEY);
+        return String(raw || '').split(/\s+/).map(t => sanitizeToken(t)).filter(Boolean);
+    } catch { return []; }
 }
 function setToken(val) { Risu.setArgument(TOKEN_ARG_KEY, sanitizeToken(val)); }
+/** Save token array (space-separated) */
+function setTokens(tokenArr) {
+    const cleaned = tokenArr.map(t => sanitizeToken(t)).filter(Boolean);
+    Risu.setArgument(TOKEN_ARG_KEY, cleaned.join(' '));
+}
+/** Add token (deduplicated) */
+async function addToken(newToken) {
+    const clean = sanitizeToken(newToken);
+    if (!clean) return false;
+    const tokens = await getTokens();
+    if (tokens.includes(clean)) return false;
+    tokens.push(clean);
+    setTokens(tokens);
+    return true;
+}
+/** Remove token at index */
+async function removeTokenAt(index) {
+    const tokens = await getTokens();
+    if (index < 0 || index >= tokens.length) return;
+    tokens.splice(index, 1);
+    setTokens(tokens);
+}
+
+/* ── Token Status Cache ── */
+const _tokenStatusCache = new Map();
+
+function _isActivePlan(userData) {
+    if (!userData) return false;
+    const plan = (userData.copilot_plan || '').toLowerCase();
+    if (plan.includes('pro') || plan.includes('plus') || plan.includes('business') || plan.includes('enterprise')) return true;
+    if (userData.quota_snapshots) return true;
+    return false;
+}
+function _getPlanLabel(userData) {
+    if (!userData) return '';
+    if (userData.codex_agent_enabled) return 'Pro+';
+    const plan = (userData.copilot_plan || '').toLowerCase();
+    if (plan.includes('plus')) return 'Pro+';
+    if (plan.includes('pro')) return 'Pro';
+    if (plan.includes('business')) return 'Biz';
+    if (plan.includes('enterprise')) return 'Enterprise';
+    if (userData.quota_snapshots) return 'Pro';
+    return '';
+}
+
+async function _checkTokenStatusCached(token, tokenIdx) {
+    const cached = _tokenStatusCache.get(token);
+    if (cached && (Date.now() - cached.checkedAt) < 5 * 60 * 1000) return cached;
+    const masked = token.length > 12 ? token.substring(0, 6) + '…' + token.substring(token.length - 4) : '***';
+    try {
+        const result = await Risu.risuFetch('https://api.github.com/copilot_internal/user', {
+            method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${sanitizeToken(token)}`, 'Content-Type': 'application/json' },
+            rawResponse: false, plainFetchForce: true,
+        });
+        let userData = null;
+        if (result?.ok && result?.data && typeof result.data === 'object') userData = result.data;
+        else if (result?.data && typeof result.data === 'string') { try { userData = JSON.parse(result.data); } catch {} }
+        if (!userData) throw new Error('사용자 정보 불가');
+        const active = _isActivePlan(userData);
+        const planLabel = active ? _getPlanLabel(userData) : '';
+        const info = { sku: userData.copilot_plan || 'unknown', active, planLabel, checkedAt: Date.now() };
+        _tokenStatusCache.set(token, info);
+        console.log(`${LOG} Token #${tokenIdx ?? '?'} [${masked}] plan="${info.sku}" active=${active}`);
+        return info;
+    } catch (e) {
+        const info = { sku: 'error', active: false, planLabel: '', checkedAt: Date.now() };
+        _tokenStatusCache.set(token, info);
+        return info;
+    }
+}
+
+/** Rotate failed token to end, active tokens first */
+async function rotateFailedToken(failedToken) {
+    const tokens = await getTokens();
+    const idx = tokens.indexOf(sanitizeToken(failedToken));
+    if (idx > -1 && tokens.length > 1) {
+        tokens.push(tokens.splice(idx, 1)[0]);
+        const active = [], inactive = [];
+        for (const t of tokens) {
+            const cached = _tokenStatusCache.get(t);
+            if (!cached || cached.active !== false) active.push(t);
+            else inactive.push(t);
+        }
+        setTokens([...active, ...inactive]);
+        if (typeof window._cpmClearCopilotTokenCache === 'function') window._cpmClearCopilotTokenCache();
+        console.log(`${LOG} Key rotation: failed token moved to end (${active.length} active, ${inactive.length} inactive)`);
+        return tokens[0];
+    }
+    return null;
+}
+
+// Expose for external use
+window._cpmCopilotRefreshTokens = null; // set later when UI opens
+window._cpmCopilotRotateToken = rotateFailedToken;
+window._cpmCopilotGetTokens = getTokens;
+window._cpmCopilotAddToken = addToken;
+window._cpmCopilotRemoveTokenAt = removeTokenAt;
+window._cpmCopilotSetTokens = setTokens;
+window._cpmCopilotCheckStatus = _checkTokenStatusCached;
+window._cpmCopilotStatusCache = _tokenStatusCache;
 
 /* ── Smart Fetch ── */
 function wrapResult(r) {

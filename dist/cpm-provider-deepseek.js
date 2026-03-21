@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - DeepSeek
 //@display-name CPM Provider - DeepSeek
-//@version 2.0.7
+//@version 2.0.8
 //@description DeepSeek Chat/Reasoner provider (IPC)
 //@icon 🐋
 //@author Cupcake

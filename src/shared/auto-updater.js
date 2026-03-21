@@ -264,13 +264,38 @@ export function createAutoUpdater(deps) {
         try {
             const bundleUrl = updateBundleUrl + '?_t=' + Date.now() + '&_r=' + Math.random().toString(36).substr(2, 6);
             console.log(`${LOG} Trying update bundle first: ${bundleUrl}`);
-            const bundleResult = await _withTimeout(
-                Risu.risuFetch(bundleUrl, { method: 'GET', plainFetchForce: true }),
-                20000, 'update bundle fetch timed out (20s)'
-            );
 
-            if (bundleResult?.data && (!bundleResult.status || bundleResult.status < 400)) {
-                const rawBundle = typeof bundleResult.data === 'string' ? JSON.parse(bundleResult.data) : bundleResult.data;
+            // Try nativeFetch first (bypasses CORS in iframe environments)
+            let rawBundle = null;
+            try {
+                const nfRes = await _withTimeout(
+                    Risu.nativeFetch(bundleUrl, { method: 'GET' }),
+                    25000, 'update bundle nativeFetch timed out (25s)'
+                );
+                if (nfRes.ok) {
+                    const bundleText = await nfRes.text();
+                    rawBundle = JSON.parse(bundleText);
+                    console.log(`${LOG} Bundle fetched via nativeFetch (${(bundleText.length / 1024).toFixed(1)}KB)`);
+                } else {
+                    console.log(`${LOG} Bundle nativeFetch status ${nfRes.status}, trying risuFetch...`);
+                }
+            } catch (/** @type {any} */ nfErr) {
+                console.log(`${LOG} Bundle nativeFetch failed: ${nfErr.message || nfErr}, trying risuFetch...`);
+            }
+
+            // Fallback to risuFetch
+            if (!rawBundle) {
+                const bundleResult = await _withTimeout(
+                    Risu.risuFetch(bundleUrl, { method: 'GET', plainFetchForce: true }),
+                    20000, 'update bundle risuFetch timed out (20s)'
+                );
+                if (bundleResult?.data && (!bundleResult.status || bundleResult.status < 400)) {
+                    rawBundle = typeof bundleResult.data === 'string' ? JSON.parse(bundleResult.data) : bundleResult.data;
+                    console.log(`${LOG} Bundle fetched via risuFetch`);
+                }
+            }
+
+            if (rawBundle && typeof rawBundle === 'object') {
 
                 // Validate bundle structure if validator provided
                 if (validateSchema) {
@@ -307,7 +332,7 @@ export function createAutoUpdater(deps) {
                 console.log(`${LOG} Bundle download OK: ${fileName} v${mainEntry.version} (${(bundledCode.length / 1024).toFixed(1)}KB)`);
                 return { ok: true, code: bundledCode };
             }
-            throw new Error(`update bundle fetch failed with status ${bundleResult?.status}`);
+            throw new Error('update bundle fetch failed: no valid bundle data received');
         } catch (/** @type {any} */ bundleErr) {
             console.warn(`${LOG} Update bundle path failed, falling back to direct JS:`, bundleErr.message || bundleErr);
         }
@@ -316,12 +341,19 @@ export function createAutoUpdater(deps) {
         let _fallbackExpectedSha256 = null;
         try {
             const vUrl = versionsUrl + '?_t=' + Date.now();
-            const vRes = await _withTimeout(
-                Risu.risuFetch(vUrl, { method: 'GET', plainFetchForce: true }),
-                10000, 'versions manifest timed out (10s)'
-            );
-            if (vRes?.data) {
-                const vRaw = typeof vRes.data === 'string' ? JSON.parse(vRes.data) : vRes.data;
+            let vRaw = null;
+            try {
+                const nfRes = await _withTimeout(Risu.nativeFetch(vUrl, { method: 'GET' }), 10000, 'versions nativeFetch timed out');
+                if (nfRes.ok) { vRaw = JSON.parse(await nfRes.text()); }
+            } catch { /* fallback */ }
+            if (!vRaw) {
+                const vRes = await _withTimeout(
+                    Risu.risuFetch(vUrl, { method: 'GET', plainFetchForce: true }),
+                    10000, 'versions manifest timed out (10s)'
+                );
+                if (vRes?.data) { vRaw = typeof vRes.data === 'string' ? JSON.parse(vRes.data) : vRes.data; }
+            }
+            if (vRaw) {
                 const vData = vRaw?.versions || vRaw;
                 _fallbackExpectedSha256 = vData?.[pluginName]?.sha256 || null;
                 if (_fallbackExpectedSha256) {
