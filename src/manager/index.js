@@ -51,6 +51,11 @@ import { createAutoUpdater } from '../shared/auto-updater.js';
 import { createSubPluginToggleUI } from '../shared/sub-plugin-toggle-ui.js';
 import { parseCustomModelsValue, normalizeCustomModel, serializeCustomModelExport, serializeCustomModelsSetting } from '../shared/custom-model-serialization.js';
 import { TAILWIND_CSS } from '../shared/tailwind-css.generated.js';
+import { isToolUseEnabled } from '../shared/tool-config.js';
+import { getActiveToolList } from '../shared/tool-definitions.js';
+import { runToolLoop } from '../shared/tool-loop.js';
+import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
+import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
 const CPM_VERSION = '2.0.0';
 const Risu = getRisu();
@@ -813,7 +818,18 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         if (p !== undefined) args.presence_penalty = p;
     }
 
-    const messages = args.prompt_chat || [];
+    let messages = args.prompt_chat || [];
+
+    // ── Prefetch Search: 메인 요청 전에 웹 검색 결과 주입 ──
+    try {
+        const prefetchResult = await injectPrefetchSearch(messages);
+        if (prefetchResult.searched) {
+            messages = prefetchResult.messages;
+            console.log(`[CPM] Prefetch search injected for: "${prefetchResult.query?.substring(0, 60)}"`);
+        }
+    } catch (prefetchErr) {
+        console.warn('[CPM] Prefetch search error (non-fatal):', prefetchErr?.message);
+    }
 
     // C-11: 토큰 사용량 추적을 위한 요청 ID
     const _requestId = safeUUID();
@@ -830,9 +846,33 @@ async function handleRequest(args, activeModelDef, abortSignal) {
 
     let result;
     try {
+        // ── Layer 2 Tool-Use: CPM이 프로바이더일 때 tool-use loop ──
+        const _toolEnabled = await isToolUseEnabled();
+        const _activeTools = _toolEnabled ? await getActiveToolList() : [];
+        const _useToolLoop = _toolEnabled && _activeTools.length > 0;
+
         const provider = registeredProviders.get(activeModelDef.provider);
         if (provider) {
-            result = await ipcFetchProvider(activeModelDef.provider, activeModelDef, messages, temp, maxTokens, args, abortSignal);
+            if (_useToolLoop) {
+                // Tool-use: 첫 요청은 non-streaming + rawJSON 모드로
+                const toolInitResult = await ipcFetchProvider(activeModelDef.provider, activeModelDef, messages, temp, maxTokens, { ...args, _cpmReturnRawJSON: true, _cpmActiveTools: _activeTools, streaming: false }, abortSignal);
+                if (toolInitResult?.success && toolInitResult?._rawData) {
+                    result = await runToolLoop({
+                        initialResult: toolInitResult,
+                        messages,
+                        config: { format: activeModelDef.format || 'openai', streaming: false, _cpmReturnRawJSON: true },
+                        temp, maxTokens, args, abortSignal,
+                        _reqId: _requestId,
+                        fetchFn: async (cfg, msgs, t, mx, a, sig, rid) => {
+                            return await ipcFetchProvider(activeModelDef.provider, activeModelDef, msgs, t, mx, { ...a, ...cfg }, sig);
+                        }
+                    });
+                } else {
+                    result = toolInitResult;
+                }
+            } else {
+                result = await ipcFetchProvider(activeModelDef.provider, activeModelDef, messages, temp, maxTokens, args, abortSignal);
+            }
         } else if (activeModelDef.provider === 'Custom') {
             result = await handleCustomModel(activeModelDef, messages, temp, maxTokens, args);
         } else {
@@ -3906,6 +3946,13 @@ function persistCustomModels() {
         // JS fallback version check (10s delay to avoid fetch contention)
         setTimeout(() => { AutoUpdater.checkMainPluginVersionQuiet().catch(() => {}); }, 10000);
         _phaseDone('auto-updater');
+
+        // ── Phase: Tool-Use (Layer 1 MCP Registration) ──
+        _phaseStart('tool-use-mcp');
+        try {
+            await registerCpmTools(CPM_VERSION);
+            _phaseDone('tool-use-mcp');
+        } catch (e) { _phaseFail('tool-use-mcp', e); }
 
         // ── Boot Summary ──
         if (_failedPhases.length > 0) {
