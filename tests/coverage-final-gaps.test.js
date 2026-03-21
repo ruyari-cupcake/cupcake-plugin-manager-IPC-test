@@ -913,7 +913,7 @@ describe('endpoints — coverage', () => {
 
     it('VERSIONS_URL includes base URL', () => {
         expect(VERSIONS_URL).toContain(CPM_BASE_URL);
-        expect(VERSIONS_URL).toContain('/api/versions');
+        expect(VERSIONS_URL).toContain('/update-bundle.json');
     });
 
     it('fallback URL is test URL when env is unknown', () => {

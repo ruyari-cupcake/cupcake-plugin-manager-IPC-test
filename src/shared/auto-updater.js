@@ -321,7 +321,8 @@ export function createAutoUpdater(deps) {
                 10000, 'versions manifest timed out (10s)'
             );
             if (vRes?.data) {
-                const vData = typeof vRes.data === 'string' ? JSON.parse(vRes.data) : vRes.data;
+                const vRaw = typeof vRes.data === 'string' ? JSON.parse(vRes.data) : vRes.data;
+                const vData = vRaw?.versions || vRaw;
                 _fallbackExpectedSha256 = vData?.[pluginName]?.sha256 || null;
                 if (_fallbackExpectedSha256) {
                     console.log(`${LOG} Fallback integrity: got expected SHA from versions manifest [${_fallbackExpectedSha256.substring(0, 12)}…]`);
@@ -760,7 +761,7 @@ export function createAutoUpdater(deps) {
             if (_versionChecked) return;
             _versionChecked = true;
 
-            // Auto-update toggle check (default OFF)
+            // Auto-update toggle check (default ON)
             if (!await _isAutoUpdateEnabled()) {
                 console.log('[CPM AutoCheck] Auto-update is disabled (cpm_auto_update_enabled=off). Skipping.');
                 return;
@@ -788,8 +789,11 @@ export function createAutoUpdater(deps) {
                 return;
             }
 
-            const manifest = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
-            if (!manifest || typeof manifest !== 'object') return;
+            const rawManifest = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
+            if (!rawManifest || typeof rawManifest !== 'object') return;
+
+            // Support both formats: { versions: { ... }, code: ... } or flat { PluginName: { version } }
+            const manifest = rawManifest.versions || rawManifest;
 
             let mainUpdateInfo = null;
             const mainRemote = manifest[pluginName];
@@ -861,7 +865,7 @@ export function createAutoUpdater(deps) {
             if (_mainVersionChecked) return;
             _mainVersionChecked = true;
 
-            // Auto-update toggle check (default OFF)
+            // Auto-update toggle check (default ON)
             if (!await _isAutoUpdateEnabled()) {
                 console.log('[CPM MainAutoCheck] Auto-update is disabled (cpm_auto_update_enabled=off). Skipping.');
                 return;

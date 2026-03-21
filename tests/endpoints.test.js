@@ -31,17 +31,17 @@ describe('endpoints', () => {
 
     it('VERSIONS_URL is derived from CPM_BASE_URL', async () => {
         const { CPM_BASE_URL, VERSIONS_URL } = await loadEndpoints();
-        expect(VERSIONS_URL).toBe(`${CPM_BASE_URL}/api/versions`);
+        expect(VERSIONS_URL).toBe(`${CPM_BASE_URL}/update-bundle.json`);
     });
 
     it('MAIN_UPDATE_URL is derived from CPM_BASE_URL', async () => {
         const { CPM_BASE_URL, MAIN_UPDATE_URL } = await loadEndpoints();
-        expect(MAIN_UPDATE_URL).toBe(`${CPM_BASE_URL}/api/main-plugin`);
+        expect(MAIN_UPDATE_URL).toBe(`${CPM_BASE_URL}/cupcake-provider-manager.js`);
     });
 
     it('UPDATE_BUNDLE_URL is derived from CPM_BASE_URL', async () => {
         const { CPM_BASE_URL, UPDATE_BUNDLE_URL } = await loadEndpoints();
-        expect(UPDATE_BUNDLE_URL).toBe(`${CPM_BASE_URL}/api/update-bundle`);
+        expect(UPDATE_BUNDLE_URL).toBe(`${CPM_BASE_URL}/update-bundle.json`);
     });
 
     it('all URLs are HTTPS', async () => {
@@ -51,18 +51,16 @@ describe('endpoints', () => {
         }
     });
 
-    it('all URLs contain the vercel app domain', async () => {
+    it('all URLs use GitHub raw content', async () => {
         const { CPM_BASE_URL } = await loadEndpoints();
-        expect(CPM_BASE_URL).toContain('cupcake-plugin-manager');
-        expect(CPM_BASE_URL).toContain('vercel.app');
+        expect(CPM_BASE_URL).toContain('raw.githubusercontent.com');
     });
 
-    it('test environment defaults to test URL', async () => {
-        // In test env (no CPM_ENV set), should resolve to test URL
+    it('test environment defaults to IPC-test repo', async () => {
         delete process.env.CPM_ENV;
         const { CPM_BASE_URL, CPM_ENV } = await loadEndpoints();
         if (CPM_ENV === 'test') {
-            expect(CPM_BASE_URL).toContain('-test');
+            expect(CPM_BASE_URL).toContain('IPC-test');
         }
     });
 
@@ -70,13 +68,13 @@ describe('endpoints', () => {
         process.env.CPM_ENV = 'production';
         const { CPM_BASE_URL, CPM_ENV } = await loadEndpoints();
         expect(CPM_ENV).toBe('production');
-        expect(CPM_BASE_URL).toBe('https://cupcake-plugin-manager.vercel.app');
+        expect(CPM_BASE_URL).toBe('https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager-IPC-prod/main/dist');
     });
 
     it('falls back to test URL for unknown CPM_ENV values', async () => {
         process.env.CPM_ENV = 'staging';
         const { CPM_BASE_URL, CPM_ENV } = await loadEndpoints();
         expect(CPM_ENV).toBe('test');
-        expect(CPM_BASE_URL).toBe('https://cupcake-plugin-manager-test.vercel.app');
+        expect(CPM_BASE_URL).toBe('https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager-IPC-test/main/dist');
     });
 });

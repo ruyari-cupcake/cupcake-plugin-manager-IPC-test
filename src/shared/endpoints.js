@@ -2,16 +2,21 @@
 /**
  * endpoints.js — Centralized endpoint URL constants for auto-updater.
  *
- * Migrated from temp_repo. The base URL is determined by CPM_ENV environment
- * variable at build time (Rollup pins the resolved value).
+ * IPC architecture uses GitHub raw URLs as primary update source.
+ * Vercel static hosting is secondary fallback.
  *
- * - CPM_ENV=production → https://cupcake-plugin-manager.vercel.app
- * - CPM_ENV=test (or unset) → https://cupcake-plugin-manager-test.vercel.app
+ * - CPM_ENV=production → prod repo raw URLs
+ * - CPM_ENV=test (or unset) → IPC-test repo raw URLs
  */
 
-const _URLS = {
+const _GITHUB_RAW = {
+    production: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager-IPC-prod/main/dist',
+    test: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager-IPC-test/main/dist',
+};
+
+const _VERCEL = {
     production: 'https://cupcake-plugin-manager.vercel.app',
-    test: 'https://cupcake-plugin-manager-test.vercel.app',
+    test: 'https://ipc-eight.vercel.app',
 };
 
 /**
@@ -30,17 +35,20 @@ function _resolveEnv() {
 
 const _env = _resolveEnv();
 
-/** @type {string} The resolved base URL for CPM backend */
-export const CPM_BASE_URL = _URLS[_env] || _URLS.test;
+/** @type {string} GitHub raw base URL for dist files */
+export const CPM_BASE_URL = _GITHUB_RAW[_env] || _GITHUB_RAW.test;
+
+/** @type {string} Vercel static hosting base URL (fallback) */
+export const CPM_VERCEL_URL = _VERCEL[_env] || _VERCEL.test;
 
 /** @type {string} Current environment key */
 export const CPM_ENV = _env;
 
-/** Version manifest endpoint (GET → JSON). */
-export const VERSIONS_URL = `${CPM_BASE_URL}/api/versions`;
+/** Version manifest: update-bundle.json from GitHub raw (lightweight: just versions + hashes). */
+export const VERSIONS_URL = `${CPM_BASE_URL}/update-bundle.json`;
 
-/** Main plugin JS download endpoint (GET → text/javascript). */
-export const MAIN_UPDATE_URL = `${CPM_BASE_URL}/api/main-plugin`;
+/** Main plugin JS download: direct raw URL. */
+export const MAIN_UPDATE_URL = `${CPM_BASE_URL}/cupcake-provider-manager.js`;
 
-/** Single-bundle update endpoint (GET → JSON with code + hashes). */
-export const UPDATE_BUNDLE_URL = `${CPM_BASE_URL}/api/update-bundle`;
+/** Full update bundle JSON (all plugins code + hashes). */
+export const UPDATE_BUNDLE_URL = `${CPM_BASE_URL}/update-bundle.json`;

@@ -1378,7 +1378,7 @@ describe('endpoints.js — constants validation', () => {
         expect(CPM_BASE_URL.startsWith('https://')).toBe(true);
         expect(['production', 'test']).toContain(CPM_ENV);
         expect(VERSIONS_URL).toContain(CPM_BASE_URL);
-        expect(VERSIONS_URL).toContain('/api/versions');
+        expect(VERSIONS_URL).toContain('/update-bundle.json');
     });
 
     it('all endpoint URLs are HTTPS', async () => {
