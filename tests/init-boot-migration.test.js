@@ -787,21 +787,28 @@ describe('C1-C9 migration functional simulation', () => {
 // ════════════════════════════════════════════════════════════════════
 // J.  Vertex Token Cache (IPC vertex.js)
 // ════════════════════════════════════════════════════════════════════
-describe('Vertex token cache — already in IPC vertex.js', () => {
-    it('vertex.js source has _tokenCaches Map', async () => {
+describe('Vertex token cache — shared vertex-auth module', () => {
+    it('vertex-auth.js source has _tokenCaches Map', async () => {
         const fs = await import('node:fs');
         const path = await import('node:path');
-        const src = fs.readFileSync(path.resolve('src/providers/vertex.js'), 'utf-8');
+        const src = fs.readFileSync(path.resolve('src/shared/vertex-auth.js'), 'utf-8');
         expect(src).toContain('_tokenCaches');
         expect(src).toContain('new Map()');
     });
 
-    it('vertex.js caches tokens with expiry check', async () => {
+    it('vertex-auth.js caches tokens with expiry check', async () => {
+        const fs = await import('node:fs');
+        const path = await import('node:path');
+        const src = fs.readFileSync(path.resolve('src/shared/vertex-auth.js'), 'utf-8');
+        expect(src).toContain('expiresAt');
+        expect(src).toContain('cached.expiresAt > Date.now()');
+    });
+
+    it('vertex.js delegates to shared vertex-auth module', async () => {
         const fs = await import('node:fs');
         const path = await import('node:path');
         const src = fs.readFileSync(path.resolve('src/providers/vertex.js'), 'utf-8');
-        expect(src).toContain('expiresAt');
-        expect(src).toContain('cached.expiresAt > Date.now()');
+        expect(src).toContain("from '../shared/vertex-auth.js'");
     });
 });
 
