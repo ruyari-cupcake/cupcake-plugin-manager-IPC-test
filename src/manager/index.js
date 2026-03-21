@@ -57,7 +57,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.1';
+const CPM_VERSION = '2.0.2';
 const Risu = getRisu();
 
 // ==========================================
@@ -2348,7 +2348,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 <div class="flex items-center justify-between mb-2">
                     <p class="text-sm font-bold text-amber-300">🔄 전체 자동 업데이트 (Global Auto-Update)</p>
                     <label class="relative inline-flex items-center cursor-pointer">
-                        <input type="checkbox" id="cpm_auto_update_enabled" class="sr-only peer" ${await getBoolVal('cpm_auto_update_enabled') ? 'checked' : ''}>
+                        <input type="checkbox" id="cpm_auto_update_enabled" class="sr-only peer" ${(await (async () => { const v = await getVal('cpm_auto_update_enabled'); const s = String(v ?? '').trim().toLowerCase(); return (s === 'false' || s === 'off' || s === 'no' || s === 'disabled') ? '' : 'checked'; })())}>
                         <div class="w-10 h-5 bg-gray-700 rounded-full peer peer-checked:bg-green-600 peer-focus:ring-2 peer-focus:ring-green-400 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
                     </label>
                 </div>

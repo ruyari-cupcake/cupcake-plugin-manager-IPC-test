@@ -123,7 +123,7 @@ export const BASE_SETTING_KEYS = [
     'cpm_transcache_display_enabled',
     'cpm_compatibility_mode',
     'cpm_copilot_nodeless_mode',
-    // Auto-update toggle (default OFF)
+    // Auto-update toggle (default ON, explicit 'false'/'off' to disable)
     'cpm_auto_update_enabled',
     // Copilot
     'tools_githubCopilotToken',

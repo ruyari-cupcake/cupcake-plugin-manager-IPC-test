@@ -738,17 +738,20 @@ export function createAutoUpdater(deps) {
 
     /**
      * Check if the auto-update toggle is enabled.
-     * Default is OFF — user must explicitly enable via plugin settings.
+     * Default is ON — user must explicitly disable via CPM Settings.
+     * Values like 'off', 'no', 'false', false, 'disabled' → disabled.
+     * Everything else (0, 1, true, undefined, null, '') → enabled.
      * @returns {Promise<boolean>}
      */
     async function _isAutoUpdateEnabled() {
         try {
             const val = await Risu.getArgument(autoUpdateArgKey);
-            if (val === true || val === 1) return true;
+            if (val === false) return false;
             const raw = String(val ?? '').trim().toLowerCase();
-            return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on';
+            if (raw === 'false' || raw === 'off' || raw === 'no' || raw === 'disabled') return false;
+            return true;
         } catch (_) {
-            return false;
+            return true;
         }
     }
 

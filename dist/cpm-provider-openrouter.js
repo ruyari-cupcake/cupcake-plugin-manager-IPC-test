@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - OpenRouter
 //@display-name CPM Provider - OpenRouter
-//@version 2.0.1
+//@version 2.0.2
 //@description OpenRouter dynamic model provider (IPC)
 //@icon 🔀
 //@author Cupcake

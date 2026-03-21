@@ -2,7 +2,7 @@
  * auto-updater-toggle-toctou.test.js
  *
  * Tests for:
- *   1. _isAutoUpdateEnabled toggle logic (default OFF)
+ *   1. _isAutoUpdateEnabled toggle logic (default ON)
  *   2. checkVersionsQuiet / checkMainPluginVersionQuiet skip when toggle OFF
  *   3. TOCTOU re-verification in validateAndInstall
  */
@@ -107,19 +107,19 @@ function createUpdater(risuOverrides = {}, depsOverrides = {}) {
 // ─── 1. _isAutoUpdateEnabled ───
 
 describe('auto-updater: _isAutoUpdateEnabled toggle', () => {
-    it('returns false when getArgument returns empty string (default OFF)', async () => {
+    it('returns true when getArgument returns empty string (default ON)', async () => {
         const { updater } = createUpdater({ getArgument: vi.fn(async () => '') });
-        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
-    it('returns false when getArgument returns undefined', async () => {
+    it('returns true when getArgument returns undefined (default ON)', async () => {
         const { updater } = createUpdater({ getArgument: vi.fn(async () => undefined) });
-        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
-    it('returns false when getArgument returns null', async () => {
+    it('returns true when getArgument returns null (default ON)', async () => {
         const { updater } = createUpdater({ getArgument: vi.fn(async () => null) });
-        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns false when getArgument returns "false"', async () => {
@@ -127,14 +127,14 @@ describe('auto-updater: _isAutoUpdateEnabled toggle', () => {
         expect(await updater._isAutoUpdateEnabled()).toBe(false);
     });
 
-    it('returns false when getArgument returns "0"', async () => {
+    it('returns true when getArgument returns "0" (default ON)', async () => {
         const { updater } = createUpdater({ getArgument: vi.fn(async () => '0') });
-        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
-    it('returns false when getArgument returns 0', async () => {
+    it('returns true when getArgument returns 0 (default ON)', async () => {
         const { updater } = createUpdater({ getArgument: vi.fn(async () => 0) });
-        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns boolean true', async () => {
@@ -167,9 +167,29 @@ describe('auto-updater: _isAutoUpdateEnabled toggle', () => {
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
-    it('returns false when getArgument throws', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => { throw new Error('no arg'); }) });
+    it('returns false when getArgument returns boolean false', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async () => false) });
         expect(await updater._isAutoUpdateEnabled()).toBe(false);
+    });
+
+    it('returns false when getArgument returns "off"', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'off') });
+        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+    });
+
+    it('returns false when getArgument returns "no"', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'no') });
+        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+    });
+
+    it('returns false when getArgument returns "disabled"', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'disabled') });
+        expect(await updater._isAutoUpdateEnabled()).toBe(false);
+    });
+
+    it('returns true when getArgument throws (default ON)', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async () => { throw new Error('no arg'); }) });
+        expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('exported constants include AUTO_UPDATE_ARG_KEY', () => {
@@ -186,10 +206,10 @@ describe('auto-updater: _isAutoUpdateEnabled toggle', () => {
 // ─── 2. checkVersionsQuiet / checkMainPluginVersionQuiet skip when toggle OFF ───
 
 describe('auto-updater: checkVersionsQuiet — auto-update toggle', () => {
-    it('skips fetch when toggle is OFF (default)', async () => {
+    it('skips fetch when toggle is explicitly OFF', async () => {
         const risuFetch = vi.fn(async () => ({ data: '{}', status: 200 }));
         const { updater } = createUpdater({
-            getArgument: vi.fn(async () => ''),
+            getArgument: vi.fn(async () => 'false'),
             risuFetch,
         });
 
@@ -211,10 +231,10 @@ describe('auto-updater: checkVersionsQuiet — auto-update toggle', () => {
 });
 
 describe('auto-updater: checkMainPluginVersionQuiet — auto-update toggle', () => {
-    it('skips fetch when toggle is OFF', async () => {
+    it('skips fetch when toggle is explicitly OFF', async () => {
         const nativeFetch = vi.fn(async () => ({ ok: true, status: 200, text: vi.fn(async () => '') }));
         const { updater } = createUpdater({
-            getArgument: vi.fn(async () => ''),
+            getArgument: vi.fn(async () => 'off'),
             nativeFetch,
         });
 
