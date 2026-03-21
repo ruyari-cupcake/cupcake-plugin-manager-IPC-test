@@ -49,3 +49,8 @@ const bundle = { versions, code };
 fs.writeFileSync(OUTPUT, JSON.stringify(bundle, null, 0), 'utf-8');
 const size = (fs.statSync(OUTPUT).size / 1024).toFixed(1);
 console.log(`\n📦 update-bundle.json generated: ${size}KB (${Object.keys(code).length} files)`);
+
+// Also copy to dist/ for Vercel deployment
+const distCopy = path.join(DIST_DIR, 'update-bundle.json');
+fs.copyFileSync(OUTPUT, distCopy);
+console.log(`📋 Copied to ${distCopy}`);

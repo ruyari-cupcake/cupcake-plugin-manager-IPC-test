@@ -10,6 +10,7 @@ import { getGeminiSafetySettings, buildGeminiThinkingConfig, validateGeminiParam
 import { createSSEStream, parseGeminiSSELine, createAnthropicSSEStream, parseGeminiNonStreamingResponse, parseClaudeNonStreamingResponse } from '../shared/sse-parser.js';
 import { formatVertexGoogleModels, formatVertexClaudeModels } from '../shared/dynamic-models.js';
 import { smartFetch, streamingFetch, safeStringify, shouldEnableStreaming } from '../shared/helpers.js';
+import { getVertexBearerToken, clearAllTokenCaches as clearVertexTokenCaches } from '../shared/vertex-auth.js';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function parseRetryAfterMs(headers) {
@@ -65,56 +66,10 @@ const settingsFields = [
     { key: 'chat_vertex_useThoughtSignature', label: 'Thought Signature 사용 (생각 서명 추출)', type: 'checkbox' },
 ];
 
-// ── OAuth Token Cache ──
-const _tokenCaches = new Map(); // hash(projectId) → { token, expiresAt }
-
-function base64url(str) {
-    return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
+// ── OAuth Token — delegated to shared/vertex-auth.js ──
 async function getVertexAccessToken(credJson) {
-    const cred = typeof credJson === 'string' ? JSON.parse(credJson) : credJson;
-    const projectId = cred.project_id || '';
-    const cacheKey = projectId;
-    const cached = _tokenCaches.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now() + 60000) return { token: cached.token, projectId };
-
-    const now = Math.floor(Date.now() / 1000);
-    const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-    const payload = base64url(JSON.stringify({
-        iss: cred.client_email,
-        scope: 'https://www.googleapis.com/auth/cloud-platform',
-        aud: 'https://oauth2.googleapis.com/token',
-        iat: now,
-        exp: now + 3600
-    }));
-    const sigInput = `${header}.${payload}`;
-
-    // Import private key and sign
-    const pemBody = cred.private_key.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\n|\r/g, '');
-    const binaryKey = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
-    // WebKit/Safari fix: crypto.subtle.importKey may fail on detached ArrayBuffer — .slice(0) creates owned copy
-    const cryptoKey = await crypto.subtle.importKey('pkcs8', binaryKey.buffer.slice(0), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
-    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', cryptoKey, new TextEncoder().encode(sigInput));
-    const sigB64 = base64url(String.fromCharCode(...new Uint8Array(sig)));
-    const jwt = `${sigInput}.${sigB64}`;
-
-    // Encode body as Uint8Array — string bodies can be corrupted by V3 bridge serialization
-    const tokenBody = `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`;
-    const tokenRes = await Risu.nativeFetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new TextEncoder().encode(tokenBody)
-    });
-
-    if (!tokenRes.ok) {
-        throw new Error(`Vertex OAuth token exchange failed: HTTP ${tokenRes.status} ${await tokenRes.text()}`);
-    }
-    const tokenData = await tokenRes.json();
-    if (!tokenData?.access_token) throw new Error('Vertex OAuth token exchange failed');
-
-    _tokenCaches.set(cacheKey, { token: tokenData.access_token, expiresAt: Date.now() + 3500000 });
-    return { token: tokenData.access_token, projectId };
+    const jsonStr = typeof credJson === 'string' ? credJson : JSON.stringify(credJson);
+    return getVertexBearerToken(jsonStr);
 }
 
 async function fetchDynamicVertexModels(settings = {}) {
