@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Copilot Token Manager
 //@display-name CPM Copilot Token Manager
-//@version 2.0.6
+//@version 2.0.7
 //@description GitHub Copilot OAuth token manager (IPC)
 //@icon 🔑
 //@author Cupcake

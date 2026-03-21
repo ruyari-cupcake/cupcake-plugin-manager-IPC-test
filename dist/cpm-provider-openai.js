@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - OpenAI
 //@display-name CPM Provider - OpenAI
-//@version 2.0.6
+//@version 2.0.7
 //@description OpenAI GPT provider (IPC)
 //@icon 🧠
 //@author Cupcake
