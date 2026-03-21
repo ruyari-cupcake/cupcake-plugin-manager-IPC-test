@@ -683,6 +683,10 @@ export function createAutoUpdater(deps) {
 
     async function retryPendingUpdateOnBoot() {
         try {
+            if (!await _isAutoUpdateEnabled()) {
+                console.log('[CPM Retry] Auto-update is disabled. Skipping pending update retry.');
+                return false;
+            }
             const pending = await readPendingUpdate();
             if (!pending) return false;
 

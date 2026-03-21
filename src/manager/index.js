@@ -48,7 +48,6 @@ import { COPILOT_CHAT_VERSION, VSCODE_VERSION, getCopilotStaticHeaders, shouldUs
 import { VERSIONS_URL, MAIN_UPDATE_URL, UPDATE_BUNDLE_URL } from '../shared/endpoints.js';
 import { createUpdateToast } from '../shared/update-toast.js';
 import { createAutoUpdater } from '../shared/auto-updater.js';
-import { createSubPluginToggleUI } from '../shared/sub-plugin-toggle-ui.js';
 import { parseCustomModelsValue, normalizeCustomModel, serializeCustomModelExport, serializeCustomModelsSetting } from '../shared/custom-model-serialization.js';
 import { TAILWIND_CSS } from '../shared/tailwind-css.generated.js';
 import { isToolUseEnabled } from '../shared/tool-config.js';
@@ -57,7 +56,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.3';
+const CPM_VERSION = '2.0.4';
 const Risu = getRisu();
 
 // ==========================================
@@ -192,7 +191,6 @@ const AutoUpdater = createAutoUpdater({
     updateBundleUrl: UPDATE_BUNDLE_URL,
     toast: UpdateToast,
 });
-const SubPluginToggleUI = createSubPluginToggleUI({ Risu, escHtml: _escHtml });
 
 // ==========================================
 // COPILOT TOKEN MANAGEMENT
@@ -2166,6 +2164,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             <div class="flex-1 overflow-y-auto py-2 pr-2" id="cpm-tab-list">
                 <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 mt-2">Common</div>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn text-cyan-300 font-semibold" data-target="tab-global">🎛️ 글로벌 기본값</button>
+                <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-tools">🔧 도구 사용 (Tool Use)</button>
 
                 <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 mt-4">Aux Slots (Map Mode)</div>
                 <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-trans">🌐 번역 (Trans)</button>
@@ -2270,6 +2269,51 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     <div id="cpm-stream-status" class="mt-4 rounded-lg border border-gray-700 bg-gray-900/70 p-3 text-xs text-gray-300">브리지 상태 확인 중...</div>
                     <div id="cpm-compat-status" class="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 text-xs text-gray-300">호환성 상태 확인 중...</div>
                 </div>
+            </div>
+        </div>
+
+        <div id="tab-tools" class="cpm-tab-content hidden">
+            <h3 class="text-3xl font-bold text-orange-400 mb-6 pb-3 border-b border-gray-700">🔧 도구 사용 (Tool Use)</h3>
+            <div class="bg-yellow-900/60 border-2 border-yellow-500 rounded-lg p-4 mb-6">
+                <h4 class="text-lg font-bold text-yellow-300 mb-1">🚧 실험적 기능</h4>
+                <p class="text-yellow-200/80 text-sm">이 기능은 테스트 중입니다. 도구 호출 시 추가 API 비용이 발생할 수 있습니다.</p>
+            </div>
+            <div class="bg-gray-800/60 border border-gray-700 rounded-lg p-4 mb-6">
+                <p class="text-gray-300 text-sm mb-2"><strong>🔧 동작 방식:</strong> Layer 2 Tool-Use — AI가 도구를 호출하면 결과를 자동으로 주입 후 재호출합니다. 최대 깊이까지 반복됩니다.</p>
+                <p class="text-gray-300 text-sm"><strong>🚀 프리페치 검색:</strong> 키워드 감지 시 검색 결과를 시스템 프롬프트에 자동 삽입합니다 (1회만, 추가 호출 없음).</p>
+            </div>
+            <div class="space-y-4">
+                <h4 class="text-lg font-bold text-orange-300 mt-4 mb-2">🔧 도구 사용 설정</h4>
+                ${await renderInput('cpm_tool_use_enabled', '🔧 도구 사용 활성화 (Master Toggle)', 'checkbox')}
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                    ${await renderInput('cpm_tool_datetime', '🕐 날짜/시간 도구', 'checkbox')}
+                    ${await renderInput('cpm_tool_calculator', '🧮 계산기 도구', 'checkbox')}
+                    ${await renderInput('cpm_tool_dice', '🎲 주사위 도구', 'checkbox')}
+                    ${await renderInput('cpm_tool_web_search', '🔍 웹 검색 도구', 'checkbox')}
+                    ${await renderInput('cpm_tool_fetch_url', '🌐 URL 가져오기 도구', 'checkbox')}
+                </div>
+                <h4 class="text-lg font-bold text-orange-300 mt-6 mb-2">🔍 웹 검색 프로바이더</h4>
+                ${await renderInput('cpm_tool_websearch_provider', '검색 프로바이더', 'select', [
+                    { value: 'brave', text: 'Brave Search API' },
+                    { value: 'serpapi', text: 'SerpAPI (Google Search)' },
+                    { value: 'google_cse', text: 'Google Custom Search Engine' },
+                    { value: 'custom', text: 'Custom URL (직접 입력)' },
+                ])}
+                ${await renderInput('cpm_tool_websearch_url', '검색 API URL (Custom용)', 'text')}
+                ${await renderInput('cpm_tool_websearch_key', '검색 API Key', 'password')}
+                ${await renderInput('cpm_tool_websearch_cx', 'Google CSE ID (cx)', 'text')}
+                <h4 class="text-lg font-bold text-orange-300 mt-6 mb-2">🚀 프리페치 검색</h4>
+                ${await renderInput('cpm_prefetch_search_enabled', '🚀 프리페치 검색 활성화', 'checkbox')}
+                ${await renderInput('cpm_prefetch_search_position', '검색 결과 삽입 위치', 'select', [
+                    { value: 'after', text: '시스템 프롬프트 뒤 (기본, 권장)' },
+                    { value: 'before', text: '시스템 프롬프트 앞' },
+                ])}
+                ${await renderInput('cpm_prefetch_search_max_results', '최대 검색 결과 수 (기본 5)', 'number')}
+                ${await renderInput('cpm_prefetch_search_snippet_only', '📝 Snippet 전용 모드', 'checkbox')}
+                ${await renderInput('cpm_prefetch_search_keywords', '🔑 트리거 키워드 (쉼표 구분)', 'text')}
+                <h4 class="text-lg font-bold text-orange-300 mt-6 mb-2">⚙️ 고급 설정</h4>
+                ${await renderInput('cpm_tool_max_depth', '최대 도구 루프 깊이 (기본 5)', 'number')}
+                ${await renderInput('cpm_tool_timeout', '도구 실행 타임아웃 ms (기본 30000)', 'number')}
             </div>
         </div>
 

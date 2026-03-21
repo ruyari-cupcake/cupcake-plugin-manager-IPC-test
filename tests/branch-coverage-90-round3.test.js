@@ -946,7 +946,7 @@ describe('auto-updater — retryPendingUpdateOnBoot branch push', () => {
                 getItem: vi.fn(async () => null),
                 setItem: vi.fn(async () => {}),
             },
-            getArgument: vi.fn(async () => 'false'),
+            getArgument: vi.fn(async () => 'true'),
             risuFetch: vi.fn(async () => ({ status: 200, data: '{}' })),
             nativeFetch: vi.fn(async () => ({
                 ok: true,
