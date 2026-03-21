@@ -57,7 +57,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.0';
+const CPM_VERSION = '2.0.1';
 const Risu = getRisu();
 
 // ==========================================

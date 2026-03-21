@@ -261,7 +261,7 @@ describe('migrated feature runtime smoke tests', () => {
         expect(risu.createMutationObserver).toHaveBeenCalledTimes(1);
         expect(observer.observe).toHaveBeenCalledWith(rootDoc.body, { childList: true, subtree: true });
         expect(rootDoc.head.__state.children).toHaveLength(1);
-        expect(parent.__state.children.some((child) => child?.__state?.attributes?.get('x-cpm-btn') === 'true')).toBe(true);
+        expect(rootDoc.body.__state.children.some((child) => child?.__state?.attributes?.get('x-cpm-btn') === 'true')).toBe(true);
         expect(typeof globalThis.window._cpmResizerCleanup).toBe('function');
 
         await globalThis.window._cpmResizerCleanup();

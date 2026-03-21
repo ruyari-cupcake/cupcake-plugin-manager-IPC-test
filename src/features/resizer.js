@@ -110,31 +110,38 @@ async function attachButtonToTextarea(ta) {
 
         await ta.setAttribute('x-cpm-resizer', '1');
 
-        // V3 API: getParent() instead of closest('div')
-        const parent = await ta.getParent();
-        if (!parent) return;
-
-        // 이미 버튼이 있으면 스킵
-        if (await parent.querySelector('[x-cpm-btn]')) return;
-
-        await parent.setStyle('position', 'relative');
-
+        // 부모 레이아웃을 건드리지 않음 — position:fixed로 body에 직접 주입
         const btn = await rootDoc.createElement('button');
         await btn.setAttribute('x-cpm-btn', 'true');
         await btn.setInnerHTML('🧁');
         await btn.setStyleAttribute(
-            'position:absolute; top:6px; right:6px; z-index:10000; ' +
+            'position:fixed; z-index:10000; ' +
             'background:rgba(59,130,246,0.85); border:none; border-radius:8px; ' +
-            'padding:5px 10px; cursor:pointer; font-size:14px; opacity:0.7; ' +
-            'transition:opacity 0.2s; line-height:1; color:white;'
+            'padding:4px 8px; cursor:pointer; font-size:13px; opacity:0.6; ' +
+            'transition:opacity 0.2s; line-height:1; color:white; pointer-events:auto;'
         );
         await btn.setAttribute('x-title', '창 최대화 / 크기 조절');
 
+        // textarea 우상단에 고정 위치 동기화
         let isMaximized = false;
+        async function syncPos() {
+            if (isMaximized) return; // 최대화 상태에서는 CSS가 위치 결정
+            try {
+                const rect = await ta.getBoundingClientRect();
+                if (!rect) return;
+                const t = (rect.top ?? rect.y ?? 0) + 4;
+                const r = (rect.right ?? ((rect.left ?? rect.x ?? 0) + (rect.width || 0)));
+                await btn.setStyle('top', t + 'px');
+                await btn.setStyle('left', (r - 48) + 'px');
+            } catch (_) {}
+        }
+        await syncPos();
+
+        // 전역 동기화 배열에 등록 (observer에서 일괄 재배치)
+        if (!window._cpmResizerSyncs) window._cpmResizerSyncs = [];
+        window._cpmResizerSyncs.push(syncPos);
 
         // V3 API: pointerup + getBoundingClientRect 히트 테스트
-        // 모든 이벤트 리스너가 document에 등록되므로,
-        // 모든 pointerup에서 이 핸들러가 실행됨 → 히트 테스트로 실제 이 버튼 클릭 확인
         await btn.addEventListener('pointerup', async (e) => {
             const cx = e.clientX ?? e.x;
             const cy = e.clientY ?? e.y;
@@ -148,7 +155,7 @@ async function attachButtonToTextarea(ta) {
             const rBottom = rect.bottom ?? (rTop + (rect.height || 0));
 
             if (cx < rLeft - 5 || cx > rRight + 5 || cy < rTop - 5 || cy > rBottom + 5) {
-                return; // 이 버튼에 대한 클릭 아님
+                return;
             }
 
             if (!isMaximized) {
@@ -160,10 +167,12 @@ async function attachButtonToTextarea(ta) {
                 isMaximized = false;
                 await ta.setAttribute('x-cpm-maximized', 'false');
                 await btn.setAttribute('x-cpm-maximized-btn', 'false');
+                await syncPos(); // 최대화 해제 시 위치 재동기화
             }
         });
 
-        await parent.appendChild(btn);
+        const body = await rootDoc.querySelector('body');
+        if (body) await body.appendChild(btn);
     } catch (err) {
         console.warn(`${LOG} Failed to attach button:`, err);
     }
@@ -210,6 +219,7 @@ async function attachButtonToTextarea(ta) {
         // V3 API: Risu.createMutationObserver 필수 (new MutationObserver 사용 불가)
         let scanPending = false;
         let nullPending = false;
+        let syncPending = false;
         const observer = await Risu.createMutationObserver(async () => {
             if (!scanPending) {
                 scanPending = true;
@@ -224,6 +234,16 @@ async function attachButtonToTextarea(ta) {
                         }
                     } catch (_) {}
                 }, 400);
+            }
+            // 버튼 위치 재동기화 (DOM 변경 시)
+            if (!syncPending && window._cpmResizerSyncs) {
+                syncPending = true;
+                setTimeout(async () => {
+                    syncPending = false;
+                    for (const fn of (window._cpmResizerSyncs || [])) {
+                        try { await fn(); } catch (_) {}
+                    }
+                }, 500);
             }
             if (!nullPending) {
                 nullPending = true;
@@ -244,6 +264,7 @@ async function attachButtonToTextarea(ta) {
         // ── Hot-reload cleanup registration ──
         window._cpmResizerCleanup = async () => {
             try { await observer.disconnect(); } catch (_) {}
+            window._cpmResizerSyncs = [];
         };
 
         console.log(`${LOG} Loaded and ready.`);

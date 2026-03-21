@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - AWS Bedrock
 //@display-name CPM Provider - AWS Bedrock
-//@version 2.0.0
+//@version 2.0.1
 //@description AWS Bedrock provider with V4 signing (IPC)
 //@icon 🔶
 //@author Cupcake

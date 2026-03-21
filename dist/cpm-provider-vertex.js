@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - Vertex AI
 //@display-name CPM Provider - Vertex AI
-//@version 2.0.0
+//@version 2.0.1
 //@description Google Vertex AI provider with OAuth (IPC)
 //@icon 🌐
 //@author Cupcake
