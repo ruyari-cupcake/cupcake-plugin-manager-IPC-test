@@ -2115,6 +2115,14 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     // Build dynamic provider tabs for sidebar + content
     let providerTabsHtml = '';
     let providerContentHtml = '';
+    // 프로바이더가 아직 등록되지 않았으면 대기 안내 표시
+    if (registeredProviders.size === 0) {
+        providerTabsHtml = `<div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mt-5 mb-2">Providers</div>
+            <div class="px-5 py-3 text-xs text-gray-500">
+                <span class="animate-pulse">⏳</span> 프로바이더 IPC 연결 대기 중...
+                <button id="cpm-reload-settings-btn" class="mt-2 w-full bg-gray-700 hover:bg-gray-600 text-white text-xs py-1 px-3 rounded transition-colors">🔄 설정 새로고침</button>
+            </div>`;
+    }
     if (registeredProviders.size > 0) {
         providerTabsHtml = `<div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mt-5 mb-2">Providers</div>`;
         for (const [name, prov] of registeredProviders) {
@@ -2336,10 +2344,21 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             <p class="text-teal-300 font-semibold mb-6 border-l-4 border-teal-500 pl-4 py-1">
                 개별 서브 플러그인의 자동 업데이트를 켜거나 끌 수 있습니다. 비활성화한 서브 플러그인은 버전 체크 시 건너뜁니다.
             </p>
+            <div class="bg-amber-900/30 border border-amber-600 rounded-lg p-4 mb-6">
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-sm font-bold text-amber-300">🔄 전체 자동 업데이트 (Global Auto-Update)</p>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="cpm_auto_update_enabled" class="sr-only peer" ${await getBoolVal('cpm_auto_update_enabled') ? 'checked' : ''}>
+                        <div class="w-10 h-5 bg-gray-700 rounded-full peer peer-checked:bg-green-600 peer-focus:ring-2 peer-focus:ring-green-400 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+                    </label>
+                </div>
+                <p class="text-xs text-amber-200/80 mb-1">이 토글을 끄면 모든 서브 플러그인의 자동 업데이트가 중지됩니다.</p>
+                <p class="text-xs text-gray-400">아래 개별 토글은 이 전역 토글이 켜져 있을 때만 적용됩니다.</p>
+            </div>
             <div class="bg-gray-800/70 border border-teal-900/50 rounded-lg p-4 mb-6">
                 <p class="text-xs text-teal-300 mb-2 font-semibold">💡 동작 방식</p>
                 <p class="text-xs text-gray-400 mb-1">• 토글을 끄면 해당 서브 플러그인의 자동 업데이트만 비활성화됩니다.</p>
-                <p class="text-xs text-gray-400 mb-1">• 전체 자동 업데이트(cpm_auto_update_enabled)가 끄면 개별 토글과 무관하게 모두 중지됩니다.</p>
+                <p class="text-xs text-gray-400 mb-1">• 위 전체 자동 업데이트 토글이 꺼져 있으면 개별 토글과 무관하게 모두 중지됩니다.</p>
                 <p class="text-xs text-gray-400">• 기본값은 활성(ON) 상태입니다.</p>
             </div>
             <div id="cpm-subplugin-toggle-container" class="space-y-3">
@@ -2763,22 +2782,69 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         document.getElementById('cpm-cm-editor-title').innerText = existing ? 'Edit Custom Model' : 'Add New Model';
     };
 
+    // ─── PC LAYOUT FIX ───
+    // RisuAI V3 sandbox iframe에서 @media min-width:48rem이 작동하지 않을 수 있음
+    // 실제 viewport 너비로 PC/모바일 레이아웃을 JS로 강제 적용
+    const _isDesktop = window.innerWidth >= 768;
+    if (_isDesktop) {
+        // Container: flex-row
+        container.classList.remove('flex-col');
+        container.classList.add('flex-row');
+        // Sidebar: fixed width, right border
+        sidebar.classList.remove('w-full', 'border-b');
+        sidebar.classList.add('w-64', 'border-r');
+        sidebar.style.maxWidth = '16rem';
+        sidebar.style.minWidth = '16rem';
+        // Mobile dropdown: always visible as flex column
+        const mobileDropdown = document.getElementById('cpm-mobile-dropdown');
+        if (mobileDropdown) {
+            mobileDropdown.classList.remove('hidden', 'absolute', 'top-full', 'left-0', 'shadow-xl', 'border-b', 'max-h-\\[70vh\\]');
+            mobileDropdown.classList.add('flex', 'static');
+            mobileDropdown.style.position = 'static';
+            mobileDropdown.style.maxHeight = 'none';
+            mobileDropdown.style.height = '100%';
+            mobileDropdown.style.boxShadow = 'none';
+        }
+        // Mobile-only elements
+        const mobileIcon = document.getElementById('cpm-mobile-icon');
+        if (mobileIcon) mobileIcon.style.display = 'none';
+        // PC shortcuts help (hidden md:flex → show)
+        const shortcutHelp = sidebar.querySelector('.items-center.gap-3.px-5');
+        if (shortcutHelp) {
+            shortcutHelp.classList.remove('hidden');
+            shortcutHelp.classList.add('flex');
+        }
+        // Content padding
+        content.style.padding = '2.5rem';
+        // Menu header: not clickable on PC
+        const menuBtn = document.getElementById('cpm-mobile-menu-btn');
+        if (menuBtn) menuBtn.style.cursor = 'default';
+    }
+
     // ─── MOBILE MENU TOGGLE ───
     const mobileMenuBtn = document.getElementById('cpm-mobile-menu-btn');
-    const mobileDropdown = document.getElementById('cpm-mobile-dropdown');
+    const mobileDropdownEl = document.getElementById('cpm-mobile-dropdown');
     const mobileIcon = document.getElementById('cpm-mobile-icon');
-    if (mobileMenuBtn) {
+    if (mobileMenuBtn && !_isDesktop) {
         mobileMenuBtn.addEventListener('click', () => {
-            const isHidden = mobileDropdown.classList.contains('hidden');
+            const isHidden = mobileDropdownEl.classList.contains('hidden');
             if (isHidden) {
-                mobileDropdown.classList.remove('hidden');
-                mobileDropdown.classList.add('flex');
-                mobileIcon.innerText = '▲';
+                mobileDropdownEl.classList.remove('hidden');
+                mobileDropdownEl.classList.add('flex');
+                if (mobileIcon) mobileIcon.innerText = '▲';
             } else {
-                mobileDropdown.classList.add('hidden');
-                mobileDropdown.classList.remove('flex');
-                mobileIcon.innerText = '▼';
+                mobileDropdownEl.classList.add('hidden');
+                mobileDropdownEl.classList.remove('flex');
+                if (mobileIcon) mobileIcon.innerText = '▼';
             }
+        });
+    }
+
+    // ─── PROVIDER RELOAD BUTTON ───
+    const reloadSettingsBtn = document.getElementById('cpm-reload-settings-btn');
+    if (reloadSettingsBtn) {
+        reloadSettingsBtn.addEventListener('click', () => {
+            openCpmSettings(initialTarget);
         });
     }
 

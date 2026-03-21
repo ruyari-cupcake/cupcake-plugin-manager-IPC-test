@@ -56,30 +56,39 @@ async function injectStyles() {
     await styleEl.setInnerHTML(`
         textarea[x-cpm-maximized="true"] {
             position: fixed !important;
-            top: 10vh !important;
-            left: 10vw !important;
-            width: 80vw !important;
-            height: 80vh !important;
+            top: 5% !important;
+            left: 5% !important;
+            width: 90% !important;
+            height: 88% !important;
             max-height: none !important;
             z-index: 999999 !important;
             background-color: var(--bgcolor, #1e1e2e) !important;
-            padding: 24px !important;
-            box-shadow: 0 0 50px rgba(0, 0, 0, 0.8), 0 0 0 9999px rgba(0, 0, 0, 0.6) !important;
+            color: var(--textc, #d1d5db) !important;
+            padding: 20px !important;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.8), 0 0 0 9999px rgba(0, 0, 0, 0.6) !important;
             border-radius: 12px !important;
             border: 2px solid var(--borderc, #555) !important;
-            font-size: 1.1em !important;
+            font-size: 1.05em !important;
+            line-height: 1.6 !important;
             resize: none !important;
             transition: all 0.2s ease-out !important;
         }
         button[x-cpm-maximized-btn="true"] {
             position: fixed !important;
-            bottom: 12vh !important;
-            right: 12vw !important;
+            bottom: 8% !important;
+            right: 8% !important;
             z-index: 9999999 !important;
-            padding: 12px !important;
-            font-size: 1.5em !important;
-            background: rgba(255, 255, 255, 0.1) !important;
+            padding: 10px 14px !important;
+            font-size: 1.3em !important;
+            background: rgba(59, 130, 246, 0.85) !important;
+            color: white !important;
+            border-radius: 50% !important;
             backdrop-filter: blur(4px) !important;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4) !important;
+            cursor: pointer !important;
+        }
+        button[x-cpm-btn]:hover {
+            opacity: 1 !important;
         }
     `);
     const head = await rootDoc.querySelector('head');
@@ -114,9 +123,10 @@ async function attachButtonToTextarea(ta) {
         await btn.setAttribute('x-cpm-btn', 'true');
         await btn.setInnerHTML('🧁');
         await btn.setStyleAttribute(
-            'position:absolute; top:4px; right:4px; z-index:10000; ' +
-            'background:rgba(59,130,246,0.8); border:none; border-radius:6px; ' +
-            'padding:4px 8px; cursor:pointer; font-size:16px; opacity:0.6;'
+            'position:absolute; top:6px; right:6px; z-index:10000; ' +
+            'background:rgba(59,130,246,0.85); border:none; border-radius:8px; ' +
+            'padding:5px 10px; cursor:pointer; font-size:14px; opacity:0.7; ' +
+            'transition:opacity 0.2s; line-height:1; color:white;'
         );
         await btn.setAttribute('x-title', '창 최대화 / 크기 조절');
 

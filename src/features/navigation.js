@@ -375,6 +375,47 @@ const MODE_LABELS = { four: '4버튼', two: '2버튼', keyboard: '⌨️키보�
             }
         };
 
+        // ── 모드 전환 토스트 ──
+        const MODE_DESCRIPTIONS = {
+            four: '↑↓ 이동 + ⏫⏬ 처음/끝',
+            two: '↑↓ 이동만',
+            keyboard: 'PageUp/PageDown 키보드 이동',
+            off: '네비게이션 비활성화'
+        };
+        let _toastTimer = null;
+        const showModeToast = async (mode) => {
+            try {
+                const existingToast = await rootDoc.querySelector('[x-cpmnavi-toast]');
+                if (existingToast) await existingToast.remove();
+
+                const toast = await rootDoc.createElement('div');
+                await toast.setAttribute('x-cpmnavi-toast', 'true');
+                await toast.setStyleAttribute(
+                    'position:fixed; bottom:80px; left:50%; transform:translateX(-50%); ' +
+                    'z-index:999999; background:rgba(0,0,0,0.85); color:#fff; ' +
+                    'padding:10px 20px; border-radius:10px; font-size:14px; ' +
+                    'font-family:-apple-system,sans-serif; text-align:center; ' +
+                    'pointer-events:none; transition:opacity 0.3s; opacity:1;'
+                );
+                await toast.setInnerHTML(
+                    `<div style="font-weight:bold;font-size:16px;margin-bottom:4px">🧭 ${MODE_LABELS[mode]}</div>` +
+                    `<div style="font-size:12px;color:#aaa">${MODE_DESCRIPTIONS[mode]}</div>`
+                );
+                const body = await rootDoc.querySelector('body');
+                if (body) await body.appendChild(toast);
+
+                if (_toastTimer) clearTimeout(_toastTimer);
+                _toastTimer = setTimeout(async () => {
+                    try {
+                        await toast.setStyle('opacity', '0');
+                        setTimeout(async () => {
+                            try { await toast.remove(); } catch (_) {}
+                        }, 400);
+                    } catch (_) {}
+                }, 2000);
+            } catch (_) {}
+        };
+
         // ── 모드 순환 ──
         const cycleMode = async () => {
             currentModeIndex = (currentModeIndex + 1) % MODES.length;
@@ -390,6 +431,8 @@ const MODE_LABELS = { four: '4버튼', two: '2버튼', keyboard: '⌨️키보�
                 case 'keyboard': await enableKeyboard();    break;
                 case 'off': break;
             }
+
+            await showModeToast(mode);
         };
 
         // ── Chat screen observer (위젯 자동 숨김/표시) ──
