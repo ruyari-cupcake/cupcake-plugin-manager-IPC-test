@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Chat Navigation
 //@display-name CPM Chat Navigation
-//@version 2.0.4
+//@version 2.0.5
 //@description Chat message navigation widget (IPC)
 //@icon 🧭
 //@author Cupcake

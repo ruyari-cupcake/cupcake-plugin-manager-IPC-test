@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - Anthropic
 //@display-name CPM Provider - Anthropic
-//@version 2.0.4
+//@version 2.0.5
 //@description Anthropic Claude provider (IPC)
 //@icon 🤖
 //@author Cupcake

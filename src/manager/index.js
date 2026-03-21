@@ -56,7 +56,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.4';
+const CPM_VERSION = '2.0.5';
 const Risu = getRisu();
 
 // ==========================================
@@ -2074,7 +2074,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
     }
     const reasoningList = [
         { value: 'none', text: 'None (없음)' }, { value: 'off', text: 'Off (끄기)' },
-        { value: 'low', text: 'Low (낮음)' }, { value: 'medium', text: 'Medium (중간)' }, { value: 'high', text: 'High (높음)' }
+        { value: 'low', text: 'Low (낮음)' }, { value: 'medium', text: 'Medium (중간)' }, { value: 'high', text: 'High (높음)' }, { value: 'xhigh', text: 'XHigh (매우 높음)' }
     ];
     const verbosityList = [
         { value: 'none', text: 'None (기본값)' }, { value: 'low', text: 'Low (낮음)' },
@@ -2091,22 +2091,48 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         { value: 'high', text: 'High (높음)' }, { value: 'max', text: 'Max (최대)' }
     ];
 
+    const slotCollisionWarning = `
+        <div class="bg-amber-900/30 border border-amber-600/50 rounded-lg p-3 mt-3 mb-4">
+            <p class="text-xs text-amber-300 font-semibold mb-1">⚠️ 동일 모델 할당 시 주의사항</p>
+            <p class="text-xs text-amber-200/80">
+                이 슬롯에 할당한 모델이 <strong>메인 채팅 모델과 동일한 경우</strong>, CPM은 요청 내용(프롬프트)을 분석하여 보조 태스크인지 판별합니다.<br/>
+                <span class="text-amber-400">→ 구분이 명확하면</span>: 아래 설정한 파라미터가 적용됩니다.<br/>
+                <span class="text-amber-400">→ 구분이 불확실하면</span>: <strong>리스AI에서 보내는 값이 그대로 사용</strong>됩니다 (CPM 오버라이드 비적용).<br/>
+                <span class="text-gray-500 text-[10px]">💡 다른 모델을 할당하면 이 제한 없이 항상 CPM 파라미터가 적용됩니다.</span>
+            </p>
+        </div>
+    `;
+
     const renderAuxParams = async (slot) => `
         <div class="mt-8 pt-6 border-t border-gray-800 space-y-2">
             <h4 class="text-xl font-bold text-gray-300 mb-2">Generation Parameters (생성 설정)</h4>
             <p class="text-xs text-blue-400 font-semibold mb-4 border-l-2 border-blue-500 pl-2">
                 여기 값을 입력하면 리스AI 설정(파라미터 분리 포함) 대신 이 값이 우선 적용됩니다.<br/>
-                비워두면 리스AI의 설정값이 사용됩니다.<br/>
-                <span class="text-gray-500">(CPM slot override &gt; RisuAI separate params &gt; RisuAI main params &gt; default 0.7)</span>
+                비워두면 CPM은 그 항목을 건드리지 않고, 리스AI가 보낸 값을 그대로 사용합니다.<br/>
+                <span class="text-gray-500">(CPM slot override &gt; RisuAI separate params &gt; RisuAI main params)</span>
             </p>
             ${await renderInput(`cpm_slot_${slot}_max_context`, 'Max Context Tokens (최대 컨텍스트)', 'number')}
             ${await renderInput(`cpm_slot_${slot}_max_out`, 'Max Output Tokens (최대 응답 크기)', 'number')}
             ${await renderInput(`cpm_slot_${slot}_temp`, 'Temperature (온도)', 'number')}
-            ${await renderInput(`cpm_slot_${slot}_top_p`, 'Top P', 'number')}
-            ${await renderInput(`cpm_slot_${slot}_top_k`, 'Top K', 'number')}
+            ${await renderInput(`cpm_slot_${slot}_top_p`, 'Top P (오답 컷팅)', 'number')}
+            ${await renderInput(`cpm_slot_${slot}_top_k`, 'Top K (오답 컷팅)', 'number')}
             ${await renderInput(`cpm_slot_${slot}_rep_pen`, 'Repetition Penalty (반복 페널티)', 'number')}
             ${await renderInput(`cpm_slot_${slot}_freq_pen`, 'Frequency Penalty (빈도 페널티)', 'number')}
             ${await renderInput(`cpm_slot_${slot}_pres_pen`, 'Presence Penalty (존재 페널티)', 'number')}
+        </div>
+        <div class="mt-8 pt-6 border-t border-gray-800 space-y-2">
+            <h4 class="text-xl font-bold text-gray-300 mb-2">Thinking / Reasoning Settings (생각·추론 설정)</h4>
+            <p class="text-xs text-blue-400 font-semibold mb-4 border-l-2 border-blue-500 pl-2">
+                프로바이더별 생각/추론 설정입니다. 비워두면(None/Off) CPM이 건드리지 않습니다.<br/>
+                Gemini = Thinking Level/Budget, OpenAI = Reasoning/Verbosity, Anthropic = Effort/Adaptive<br/>
+                <span class="text-gray-500">(CPM slot override &gt; Custom model default &gt; RisuAI params)</span>
+            </p>
+            ${await renderInput(`cpm_slot_${slot}_thinking`, 'Thinking Level (Gemini 생각 수준)', 'select', thinkingList)}
+            ${await renderInput(`cpm_slot_${slot}_thinking_budget`, 'Thinking Budget Tokens (Gemini 2.5 생각 토큰, 0=끄기)', 'number')}
+            ${await renderInput(`cpm_slot_${slot}_reasoning`, 'Reasoning Effort (OpenAI o1/o3)', 'select', reasoningList)}
+            ${await renderInput(`cpm_slot_${slot}_verbosity`, 'Response Verbosity (OpenAI)', 'select', verbosityList)}
+            ${await renderInput(`cpm_slot_${slot}_effort`, 'Anthropic Effort (적응형 추론)', 'select', effortList)}
+            ${await renderInput(`cpm_slot_${slot}_adaptive_thinking`, 'Adaptive Thinking (Anthropic 적응형 추론)', 'checkbox')}
         </div>
     `;
 
@@ -2270,6 +2296,28 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     <div id="cpm-compat-status" class="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 text-xs text-gray-300">호환성 상태 확인 중...</div>
                 </div>
             </div>
+            <div class="mt-10 pt-6 border-t border-gray-700">
+                <h4 class="text-xl font-bold text-purple-400 mb-4">📊 토큰 사용량 표시 (Token Usage Display)</h4>
+                <div class="bg-gray-800/70 border border-purple-900/50 rounded-lg p-4 mb-6">
+                    <p class="text-xs text-purple-300 mb-2 font-semibold">📊 실시간 토큰 사용량 알림</p>
+                    <p class="text-xs text-gray-400 mb-2">활성화하면 API 응답이 올 때마다 화면 우측 상단에 토큰 사용량을 표시합니다.</p>
+                    <p class="text-xs text-gray-500">💡 OpenAI, Anthropic, Gemini, Vertex, AWS 등 모든 프로바이더에서 동작합니다.</p>
+                </div>
+                <div class="space-y-3">
+                    ${await renderInput('cpm_show_token_usage', '토큰 사용량 표시 (Show Token Usage Toast)', 'checkbox')}
+                </div>
+            </div>
+            <div class="mt-10 pt-6 border-t border-gray-700">
+                <h4 class="text-xl font-bold text-yellow-400 mb-4">🔄 자동 업데이트 제어 (Auto-Update Control)</h4>
+                <div class="bg-gray-800/70 border border-yellow-900/50 rounded-lg p-4 mb-6">
+                    <p class="text-xs text-yellow-300 mb-2 font-semibold">🔒 메인 플러그인 자동 업데이트를 비활성화합니다</p>
+                    <p class="text-xs text-gray-400 mb-2">활성화하면 새 버전이 있어도 자동으로 설치하지 않고, 알림만 표시합니다.</p>
+                    <p class="text-xs text-gray-500">💡 리스 설정의 수동 업데이트 (+ 버튼)는 항상 동작합니다. 서브 플러그인 알림에도 영향 없습니다.</p>
+                </div>
+                <div class="space-y-3">
+                    ${await renderInput('cpm_disable_autoupdate', '메인 플러그인 자동 업데이트 비활성화', 'checkbox')}
+                </div>
+            </div>
         </div>
 
         <div id="tab-tools" class="cpm-tab-content hidden">
@@ -2323,6 +2371,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 메인 UI에서 선택한 프로바이더와 다르게, 번역 태스크만 자동으로 전담할 프로바이더를 선택합니다.
             </p>
             ${await renderInput('cpm_slot_translation', '번역 전담 모델 선택 (Translation Model)', 'select', providersList)}
+            ${slotCollisionWarning}
             ${await renderAuxParams('translation')}
         </div>
 
@@ -2332,6 +2381,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 캐릭터 리액션/표정 태스크를 처리할 작고 빠른 모델을 지정하세요.
             </p>
             ${await renderInput('cpm_slot_emotion', '감정 판독 전담 모델 (Emotion/Hypa)', 'select', providersList)}
+            ${slotCollisionWarning}
             ${await renderAuxParams('emotion')}
         </div>
 
@@ -2341,12 +2391,38 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                 채팅 메모리 요약 등 긴 텍스트 축약 역할을 전담할 모델을 지정하세요.
             </p>
             ${await renderInput('cpm_slot_memory', '하이파 전담 모델 (Memory/Summarize)', 'select', providersList)}
+            ${slotCollisionWarning}
             ${await renderAuxParams('memory')}
+            <div class="mt-8 pt-6 border-t border-gray-700">
+                <h4 class="text-xl font-bold text-orange-400 mb-4">🔗 HypaV3 임베딩 프록시</h4>
+                <div class="bg-gray-800/70 border border-orange-900/50 rounded-lg p-4 mb-4">
+                    <p class="text-xs text-orange-300 mb-3 font-semibold">⚡ Nodeless 환경에서 HypaV3 임베딩 사용하기</p>
+                    <p class="text-xs text-gray-400 mb-3">Nodeless(도커/셀프호스트) 환경에서는 HypaV3의 custom 임베딩이 CORS/프록시 인증 문제로 실패합니다. 아래 두 방법 중 하나를 쓰면 해결됩니다.</p>
+                    <div class="bg-gray-900 rounded p-3 mb-3">
+                        <p class="text-xs font-bold text-green-400 mb-2">🖥️ 방법 1: 로컬 프록시 (copilot-proxy.exe)</p>
+                        <ol class="text-xs text-gray-300 space-y-1.5 list-decimal list-inside">
+                            <li>copilot-proxy.exe 실행</li>
+                            <li>하이파V3: 모델: custom / Custom Server URL: http://localhost:18976/v1 / API Key: (본인의 임베딩 API 키) / Model: (본인이 쓰는 모델명)</li>
+                        </ol>
+                    </div>
+                    <div class="bg-gray-900 rounded p-3 mb-3">
+                        <p class="text-xs font-bold text-blue-400 mb-2">☁️ 방법 2: Cloudflare Worker (인터넷 배포)</p>
+                        <ol class="text-xs text-gray-300 space-y-1.5 list-decimal list-inside">
+                            <li>Cloudflare Workers에 코드 복붙 → Deploy</li>
+                            <li>하이파V3: 모델: custom / Custom Server URL: https://내워커.workers.dev/v1 / API Key: (본인의 임베딩 API 키) / Model: (본인이 쓰는 모델명)</li>
+                        </ol>
+                    </div>
+                    <div class="bg-gray-900/50 rounded p-2 mb-2">
+                        <p class="text-xs text-gray-400">모델명 자동 감지: voyage-* → Voyage AI, text-embedding-* → OpenAI, embed-* → Cohere, jina-* → Jina, mistral-* → Mistral</p>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="tab-other" class="cpm-tab-content hidden">
             <h3 class="text-3xl font-bold mb-6 pb-3 border-b border-gray-700">트리거/루아 백그라운드 설정 (Other)</h3>
             ${await renderInput('cpm_slot_other', 'Lua 스크립트 등 무거운 유틸 전담 모델 (Other/Trigger)', 'select', providersList)}
+            ${slotCollisionWarning}
             ${await renderAuxParams('other')}
         </div>
 
@@ -2607,6 +2683,16 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                         <p class="text-xs text-gray-500 mt-1">🔄 키를 2개 이상 입력하면 자동으로 키회전이 활성화됩니다.</p>
                     </div>
                     <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-400 mb-1">인증 방식 (Auth Type)</label>
+                        <select id="cpm-cm-auth-type" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white">
+                            <option value="api_key">API Key</option>
+                            <option value="service_account">Service Account JSON (Vertex AI)</option>
+                        </select>
+                        <p id="cpm-cm-auth-type-hint" class="text-[11px] text-amber-400/70 mt-1 hidden">
+                            ⚠️ Google Cloud Service Account JSON 전체를 위 API Key 필드에 붙여넣으세요. Vertex AI 엔드포인트 전용입니다.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
                         <label class="block text-sm font-medium text-gray-400 mb-1">CORS Proxy URL <span class="text-xs text-yellow-400">(선택사항 — 노드리스/CORS 우회용)</span></label>
                         <input type="text" id="cpm-cm-proxy-url" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm" placeholder="https://my-proxy.workers.dev">
                         <label class="mt-2 flex items-center space-x-2 text-xs text-gray-400 cursor-pointer">
@@ -2698,6 +2784,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                             <p class="text-xs text-amber-300 ml-6">※ 글로벌 탭의 "스트리밍 패스스루 활성화"도 함께 켜야 합니다.</p>
                             <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-thought" class="form-checkbox bg-gray-800"> <span>useThoughtSignature</span></label>
                             <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-adaptive-thinking" class="form-checkbox bg-gray-800"> <span>useAdaptiveThinking (적응형 사고)</span></label>
+                            <label class="flex items-center space-x-2 text-sm text-gray-300"><input type="checkbox" id="cpm-cm-copilot-cache" class="form-checkbox bg-gray-800"> <span>Copilot Cache Control <span class="text-xs text-yellow-400">(비표준)</span></span></label>
                         </div>
                     </div>
                     <div class="md:col-span-2 mt-4 border-t border-gray-800 pt-4">
@@ -2822,7 +2909,19 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         el('cpm-cm-streaming').checked = parseEditorBool(m.streaming);
         el('cpm-cm-thought').checked = parseEditorBool(m.thought);
         el('cpm-cm-adaptive-thinking').checked = parseEditorBool(m.adaptiveThinking);
+        el('cpm-cm-copilot-cache').checked = parseEditorBool(m.copilotCache);
+        el('cpm-cm-auth-type').value = m.authType || 'api_key';
         el('cpm-cm-custom-params').value = m.customParams || '';
+        // Auth type UI toggle
+        const authHint = document.getElementById('cpm-cm-auth-type-hint');
+        const keyField = /** @type {HTMLTextAreaElement} */ (document.getElementById('cpm-cm-key'));
+        if ((m.authType || 'api_key') === 'service_account') {
+            if (authHint) authHint.classList.remove('hidden');
+            if (keyField) { keyField.rows = 6; keyField.placeholder = '{"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}'; }
+        } else {
+            if (authHint) authHint.classList.add('hidden');
+            if (keyField) { keyField.rows = 2; keyField.placeholder = 'sk-xxxx 또는 여러 키를 공백/줄바꿈으로 구분'; }
+        }
         document.getElementById('cpm-cm-editor-title').innerText = existing ? 'Edit Custom Model' : 'Add New Model';
     };
 
@@ -2981,6 +3080,20 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         cmEditor.classList.add('hidden');
     });
 
+    // Auth type toggle
+    document.getElementById('cpm-cm-auth-type').addEventListener('change', (e) => {
+        const authType = /** @type {HTMLSelectElement} */ (e.target).value;
+        const hint = document.getElementById('cpm-cm-auth-type-hint');
+        const keyField = /** @type {HTMLTextAreaElement} */ (document.getElementById('cpm-cm-key'));
+        if (authType === 'service_account') {
+            if (hint) hint.classList.remove('hidden');
+            if (keyField) { keyField.rows = 6; keyField.placeholder = '{"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}'; }
+        } else {
+            if (hint) hint.classList.add('hidden');
+            if (keyField) { keyField.rows = 2; keyField.placeholder = 'sk-xxxx 또는 여러 키를 공백/줄바꿈으로 구분'; }
+        }
+    });
+
     document.getElementById('cpm-cm-save').addEventListener('click', () => {
         /** @returns {HTMLInputElement} */
         const el = (id) => /** @type {HTMLInputElement} */ (document.getElementById(id));
@@ -2991,6 +3104,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             model: el('cpm-cm-model').value,
             url: el('cpm-cm-url').value,
             key: el('cpm-cm-key').value,
+            authType: el('cpm-cm-auth-type').value || 'api_key',
             proxyUrl: el('cpm-cm-proxy-url').value,
             proxyDirect: el('cpm-cm-proxy-direct').checked,
             format: el('cpm-cm-format').value,
@@ -3012,6 +3126,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
             decoupled: !el('cpm-cm-streaming').checked,
             thought: el('cpm-cm-thought').checked,
             adaptiveThinking: el('cpm-cm-adaptive-thinking').checked,
+            copilotCache: el('cpm-cm-copilot-cache').checked,
             customParams: el('cpm-cm-custom-params').value,
         });
         const existingIdx = CUSTOM_MODELS_CACHE.findIndex(x => x.uniqueId === uid);

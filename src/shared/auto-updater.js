@@ -750,6 +750,13 @@ export function createAutoUpdater(deps) {
      */
     async function _isAutoUpdateEnabled() {
         try {
+            // Check cpm_disable_autoupdate (inverse: true = disabled)
+            const disableVal = await Risu.getArgument('cpm_disable_autoupdate');
+            if (disableVal === true || disableVal === 'true') return false;
+            const disableRaw = String(disableVal ?? '').trim().toLowerCase();
+            if (disableRaw === 'true' || disableRaw === 'on' || disableRaw === 'yes' || disableRaw === 'enabled' || disableRaw === '1') return false;
+
+            // Check cpm_auto_update_enabled (normal: false = disabled)
             const val = await Risu.getArgument(autoUpdateArgKey);
             if (val === false) return false;
             const raw = String(val ?? '').trim().toLowerCase();

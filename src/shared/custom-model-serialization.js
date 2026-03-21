@@ -96,6 +96,8 @@ export function normalizeCustomModel(raw, options = {}) {
         decoupled,
         thought: toBool(raw?.thought),
         adaptiveThinking: toBool(raw?.adaptiveThinking),
+        copilotCache: toBool(raw?.copilotCache),
+        authType: toText(raw?.authType || 'api_key') || 'api_key',
         customParams: toText(raw?.customParams),
     };
 

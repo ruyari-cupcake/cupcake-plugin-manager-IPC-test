@@ -138,33 +138,38 @@ describe('auto-updater: _isAutoUpdateEnabled toggle', () => {
     });
 
     it('returns true when getArgument returns boolean true', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => true) });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : true) });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns 1', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => 1) });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : 1) });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns "true"', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'true') });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : 'true') });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns "1"', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => '1') });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : '1') });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns "yes"', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'yes') });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : 'yes') });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
     });
 
     it('returns true when getArgument returns "on"', async () => {
-        const { updater } = createUpdater({ getArgument: vi.fn(async () => 'on') });
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : 'on') });
         expect(await updater._isAutoUpdateEnabled()).toBe(true);
+    });
+
+    it('returns false when cpm_disable_autoupdate is true', async () => {
+        const { updater } = createUpdater({ getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? 'true' : null) });
+        expect(await updater._isAutoUpdateEnabled()).toBe(false);
     });
 
     it('returns false when getArgument returns boolean false', async () => {

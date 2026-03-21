@@ -542,7 +542,7 @@ describe('checkMainPluginVersionQuiet branch push', () => {
 
     it('nativeFetch fails → risuFetch fallback returns non-string data', async () => {
         const mockRisu = createMockRisu({
-            getArgument: vi.fn(async () => 'true'),
+            getArgument: vi.fn(async (key) => key === 'cpm_disable_autoupdate' ? null : 'true'),
             nativeFetch: vi.fn().mockRejectedValue(new Error('native fail')),
             risuFetch: vi.fn().mockResolvedValue({
                 data: { toString() { return '//@version 1.20.0\n// code'; } },
