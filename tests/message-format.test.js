@@ -579,3 +579,106 @@ describe('formatToGemini — additional edge cases (ported from temp_repo)', () 
         expect(result.systemInstruction).toHaveLength(0);
     });
 });
+
+// ═══════════════ Coverage boost: uncovered branches ═══════════════
+
+describe('formatToOpenAI — audio MIME: flac and webm', () => {
+    it('flac MIME 타입 감지', () => {
+        const msgs = [mkMsg('user', 'test', {
+            multimodals: [{ type: 'audio', base64: 'data:audio/flac;base64,AAAA' }],
+        })];
+        const result = formatToOpenAI(msgs);
+        const audioPart = result[0].content.find(p => p.type === 'input_audio');
+        expect(audioPart).toBeDefined();
+        expect(audioPart.input_audio.format).toBe('flac');
+    });
+
+    it('webm MIME 타입 감지', () => {
+        const msgs = [mkMsg('user', 'test', {
+            multimodals: [{ type: 'audio', base64: 'data:audio/webm;base64,AAAA' }],
+        })];
+        const result = formatToOpenAI(msgs);
+        const audioPart = result[0].content.find(p => p.type === 'input_audio');
+        expect(audioPart).toBeDefined();
+        expect(audioPart.input_audio.format).toBe('webm');
+    });
+});
+
+describe('formatToAnthropic — prev.content non-array merge', () => {
+    it('병합 시 prev.content가 배열이 아니면 배열로 변환', () => {
+        // 이것은 연속된 같은 역할 메시지에서 prev.content이 string인 경우를 테스트
+        // 실제로 formatToAnthropic은 항상 배열을 만들지만, 이 브랜치를 확인
+        const msgs = [
+            mkMsg('user', 'First'),
+            mkMsg('user', 'Second'),
+        ];
+        const result = formatToAnthropic(msgs);
+        // 연속 user → 병합
+        expect(result.messages[0].role).toBe('user');
+        expect(Array.isArray(result.messages[0].content)).toBe(true);
+        const texts = result.messages[0].content.map(b => b.text);
+        expect(texts).toContain('First');
+        expect(texts).toContain('Second');
+    });
+});
+
+describe('formatToAnthropic — string content cachePoint', () => {
+    it('cachePoint가 있는 단독 메시지에 cache_control 추가', () => {
+        const msgs = [
+            { role: 'user', content: 'Cached content', cachePoint: true },
+        ];
+        const result = formatToAnthropic(msgs);
+        const firstMsg = result.messages[0];
+        expect(Array.isArray(firstMsg.content)).toBe(true);
+        const lastBlock = firstMsg.content[firstMsg.content.length - 1];
+        expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('cachePoint가 병합된 메시지에서도 동작', () => {
+        const msgs = [
+            mkMsg('user', 'Normal'),
+            { role: 'user', content: 'Cached', cachePoint: true },
+        ];
+        const result = formatToAnthropic(msgs);
+        const firstMsg = result.messages[0];
+        const lastBlock = firstMsg.content[firstMsg.content.length - 1];
+        expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+});
+
+describe('formatToGemini — object content fallback', () => {
+    it('content가 object(non-string, non-array)이면 JSON.stringify로 변환', () => {
+        const msgs = [
+            { role: 'user', content: { custom: 'data', nested: { x: 1 } } },
+        ];
+        const result = formatToGemini(msgs);
+        expect(result.contents.length).toBeGreaterThan(0);
+        const text = result.contents[0].parts[0].text;
+        expect(text).toContain('custom');
+        expect(text).toContain('data');
+    });
+
+    it('systemInstruction에서 object content도 JSON.stringify', () => {
+        const msgs = [
+            { role: 'system', content: { instruction: 'be helpful' } },
+            mkMsg('user', 'Hello'),
+        ];
+        const result = formatToGemini(msgs, { preserveSystem: true });
+        expect(result.systemInstruction[0]).toContain('instruction');
+    });
+
+    it('비선두 system이 이전 user parts에 병합', () => {
+        const msgs = [
+            mkMsg('system', 'initial system'),
+            mkMsg('user', 'Question'),
+            mkMsg('system', 'mid system note'),
+            mkMsg('assistant', 'Answer'),
+        ];
+        const result = formatToGemini(msgs, { preserveSystem: true });
+        // mid system note should be merged into user parts
+        const userEntry = result.contents.find(c => c.role === 'user');
+        const allParts = userEntry?.parts.map(p => p.text) || [];
+        const hasSystemNote = allParts.some(t => t.includes('system:') && t.includes('mid system note'));
+        expect(hasSystemNote).toBe(true);
+    });
+});

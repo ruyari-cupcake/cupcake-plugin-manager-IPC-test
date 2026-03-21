@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createUpdateToast } from '../src/shared/update-toast.js';
 
 // ── Mock RisuAI DOM API ──
@@ -239,5 +239,126 @@ describe('createUpdateToast edge cases', () => {
         const t = createUpdateToast({ Risu: risu, escHtml: (s) => s });
         await t.showUpdateToast([{ name: 'X', icon: '🔌', localVersion: '1.0', remoteVersion: '2.0' }]);
         await t.showMainAutoUpdateResult('1.0', '2.0', '', true);
+    });
+});
+
+// ── Timer callback coverage ──
+describe('createUpdateToast timer callbacks', () => {
+    let doc, risu, toast;
+
+    beforeEach(() => {
+        vi.useFakeTimers();
+        const elements = {};
+        const mockElement = (tag) => ({
+            _tag: tag,
+            _attrs: {},
+            _styles: {},
+            _innerHTML: '',
+            setAttribute: vi.fn(async (k, v) => {}),
+            setStyle: vi.fn(async (k, v) => {}),
+            setInnerHTML: vi.fn(async () => {}),
+            remove: vi.fn(async () => {}),
+            appendChild: vi.fn(async (child) => {}),
+        });
+
+        doc = {
+            createElement: vi.fn(async (tag) => {
+                const el = mockElement(tag);
+                elements[tag] = el;
+                return el;
+            }),
+            querySelector: vi.fn(async (sel) => {
+                if (sel === 'body') return { appendChild: vi.fn(async () => {}) };
+                return null;
+            }),
+            _elements: elements,
+        };
+        risu = { getRootDocument: vi.fn(async () => doc) };
+        toast = createUpdateToast({ Risu: risu, escHtml: (s) => String(s ?? '') });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('showUpdateToast fade-in timer fires at 50ms', async () => {
+        await toast.showUpdateToast([{ name: 'P', icon: '🧩', localVersion: '1.0', remoteVersion: '2.0' }]);
+        const el = doc._elements['div'];
+
+        await vi.advanceTimersByTimeAsync(50);
+
+        const opacityCall = el.setStyle.mock.calls.find(([k, v]) => k === 'opacity' && v === '1');
+        expect(opacityCall).toBeTruthy();
+    });
+
+    it('showUpdateToast fade-out and remove timer fires at 8000ms', async () => {
+        await toast.showUpdateToast([{ name: 'P', icon: '🧩', localVersion: '1.0', remoteVersion: '2.0' }]);
+        const el = doc._elements['div'];
+
+        await vi.advanceTimersByTimeAsync(8050);
+
+        const fadeOutCall = el.setStyle.mock.calls.find(([k, v]) => k === 'opacity' && v === '0');
+        expect(fadeOutCall).toBeTruthy();
+
+        await vi.advanceTimersByTimeAsync(400);
+        expect(el.remove).toHaveBeenCalled();
+    });
+
+    it('showMainAutoUpdateResult success fade-in fires at 50ms', async () => {
+        await toast.showMainAutoUpdateResult('1.0', '2.0', 'changes', true);
+        const el = doc._elements['div'];
+
+        await vi.advanceTimersByTimeAsync(50);
+
+        const opacityCall = el.setStyle.mock.calls.find(([k, v]) => k === 'opacity' && v === '1');
+        expect(opacityCall).toBeTruthy();
+    });
+
+    it('showMainAutoUpdateResult success dismiss at 10000ms', async () => {
+        await toast.showMainAutoUpdateResult('1.0', '2.0', '', true);
+        const el = doc._elements['div'];
+
+        await vi.advanceTimersByTimeAsync(10050);
+
+        const fadeOutCall = el.setStyle.mock.calls.find(([k, v]) => k === 'opacity' && v === '0');
+        expect(fadeOutCall).toBeTruthy();
+
+        await vi.advanceTimersByTimeAsync(400);
+        expect(el.remove).toHaveBeenCalled();
+    });
+
+    it('showMainAutoUpdateResult failure dismiss at 15000ms', async () => {
+        await toast.showMainAutoUpdateResult('1.0', '2.0', '', false, 'error');
+        const el = doc._elements['div'];
+
+        await vi.advanceTimersByTimeAsync(15050);
+
+        const fadeOut = el.setStyle.mock.calls.find(([k, v]) => k === 'opacity' && v === '0');
+        expect(fadeOut).toBeTruthy();
+
+        await vi.advanceTimersByTimeAsync(400);
+        expect(el.remove).toHaveBeenCalled();
+    });
+
+    it('showMainAutoUpdateResult removes existing main toast', async () => {
+        const existingMainToast = { remove: vi.fn(async () => {}) };
+        doc.querySelector = vi.fn(async (sel) => {
+            if (sel === '[x-cpm-main-toast]') return existingMainToast;
+            if (sel === 'body') return { appendChild: vi.fn(async () => {}) };
+            return null;
+        });
+
+        await toast.showMainAutoUpdateResult('1.0', '2.0', '', true);
+        expect(existingMainToast.remove).toHaveBeenCalled();
+    });
+
+    it('showMainAutoUpdateResult body not found returns early', async () => {
+        doc.querySelector = vi.fn(async (sel) => {
+            if (sel === 'body') return null;
+            return null;
+        });
+
+        // Should not throw
+        await toast.showMainAutoUpdateResult('1.0', '2.0', '', true);
     });
 });
