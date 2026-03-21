@@ -35,7 +35,14 @@ function setToken(val) { Risu.setArgument(TOKEN_ARG_KEY, sanitizeToken(val)); }
 /* ── Smart Fetch ── */
 function wrapResult(r) {
     const ok = !!r.ok, status = r.status || (ok ? 200 : 400), data = r.data, headers = r.headers || {};
-    return { ok, status, headers, async json() { return typeof data === 'object' ? data : JSON.parse(data); }, async text() { return typeof data === 'string' ? data : JSON.stringify(data); } };
+    return { ok, status, headers,
+        async json() {
+            if (typeof data === 'object' && data !== null) return data;
+            try { return JSON.parse(data); }
+            catch { return { error: { message: `Non-JSON response (${status})`, raw: String(data).substring(0, 500) } }; }
+        },
+        async text() { return typeof data === 'string' ? data : JSON.stringify(data); }
+    };
 }
 function isRealHttp(r) { return (r.headers && Object.keys(r.headers).length > 0) || (r.status && r.status !== 400) || (r.data && typeof r.data === 'object'); }
 
@@ -58,7 +65,18 @@ async function copilotFetch(url, opts = {}) {
     // API → nativeFetch first
     try {
         const res = await Risu.nativeFetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-        if (res.ok || (res.status && res.status !== 0)) return res;
+        if (res.ok || (res.status && res.status !== 0)) {
+            // FIX: Wrap nativeFetch response with safe JSON parsing (same as manager fix)
+            const rawText = await res.text();
+            return {
+                ok: res.ok, status: res.status, headers: res.headers || {},
+                async json() {
+                    try { return JSON.parse(rawText); }
+                    catch { return { error: { message: `Non-JSON response (${res.status})`, raw: rawText.substring(0, 500) } }; }
+                },
+                async text() { return rawText; },
+            };
+        }
     } catch {}
     // direct CORS
     if (canUseRisuFetch) {

@@ -67,7 +67,18 @@ export async function ensureCopilotApiToken(deps = {}) {
                 _copilotTokenCache = { token: '', expiry: Date.now() + _NEGATIVE_CACHE_MS };
                 return '';
             }
-            const data = await res.json();
+            // FIX: Read as text first, then safely parse JSON.
+            // Prevents "Unexpected token '/' is not valid JSON" when the V3 bridge
+            // returns a JS plugin file (starting with //@api 3.0) instead of API JSON.
+            let rawText;
+            try { rawText = typeof res.text === 'function' ? await res.text() : ''; } catch { rawText = ''; }
+            let data;
+            try { data = typeof rawText === 'string' && rawText ? JSON.parse(rawText) : (typeof res.json === 'function' ? await res.json() : {}); }
+            catch {
+                console.error('[Copilot] Token exchange response is not valid JSON:', String(rawText).substring(0, 200));
+                _copilotTokenCache = { token: '', expiry: Date.now() + _NEGATIVE_CACHE_MS };
+                return '';
+            }
             // Standard token response
             if (data?.token) {
                 const expiryMs = data.expires_at ? data.expires_at * 1000 : Date.now() + 1800000;

@@ -56,7 +56,7 @@ import { runToolLoop } from '../shared/tool-loop.js';
 import { registerCpmTools, refreshCpmTools } from '../shared/tool-mcp-bridge.js';
 import { injectPrefetchSearch } from '../shared/prefetch-search.js';
 
-const CPM_VERSION = '2.0.5';
+const CPM_VERSION = '2.0.6';
 const Risu = getRisu();
 
 // ==========================================
@@ -265,7 +265,21 @@ async function _copilotFetch(url, opts = {}) {
         // (string bodies can be corrupted by postMessage bridge → "not valid JSON" errors)
         const nfBody = body ? new TextEncoder().encode(JSON.stringify(body)) : undefined;
         const res = await Risu.nativeFetch(url, { method, headers, body: nfBody });
-        if (res.ok || (res.status && res.status !== 0)) return res;
+        if (res.ok || (res.status && res.status !== 0)) {
+            // FIX: Wrap nativeFetch response with safe JSON parsing.
+            // The V3 bridge can sometimes return wrong content (e.g. a JS plugin file
+            // from a concurrent auto-updater fetch instead of the actual API JSON),
+            // causing "Unexpected token '/' is not valid JSON" when callers invoke .json().
+            const rawText = await res.text();
+            return {
+                ok: res.ok, status: res.status, headers: res.headers,
+                json: async () => {
+                    try { return JSON.parse(rawText); }
+                    catch { return { error: { message: `Non-JSON response (${res.status})`, raw: rawText.substring(0, 500) } }; }
+                },
+                text: async () => rawText,
+            };
+        }
     } catch {}
     if (canUseRisuFetch) {
         try {
@@ -2230,7 +2244,7 @@ async function openCpmSettings(initialTarget = 'tab-global') {
         <div id="tab-global" class="cpm-tab-content">
             <h3 class="text-3xl font-bold text-cyan-400 mb-6 pb-3 border-b border-gray-700">🎛️ 글로벌 기본값 (Global Fallback Parameters)</h3>
             <p class="text-cyan-300 font-semibold mb-4 border-l-4 border-cyan-500 pl-4 py-1">
-                리스AI가 파라미터를 보내지 않을 때 (파라미터 분리 ON + 미설정 등) 여기 값이 사용됩니다.
+                리스AI가 특정 파라미터를 보내지 않았을 때만, 여기 입력한 값이 보조 기본값으로 사용됩니다.
             </p>
             <div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-6">
                 <h4 class="text-sm font-bold text-gray-300 mb-3">📋 파라미터 우선순위 (높은 순서)</h4>
@@ -2239,15 +2253,15 @@ async function openCpmSettings(initialTarget = 'tab-global') {
                     <div class="flex items-center"><span class="bg-blue-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">2</span> 리스AI 파라미터 분리 값</div>
                     <div class="flex items-center"><span class="bg-green-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">3</span> 리스AI 메인 모델 파라미터</div>
                     <div class="flex items-center"><span class="bg-cyan-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">4</span> <strong class="text-cyan-300">⭐ 여기: CPM 글로벌 기본값</strong></div>
-                    <div class="flex items-center"><span class="bg-gray-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">5</span> 하드코딩 기본값 (Temperature 0.7 / Max Tokens 4096)</div>
                 </div>
             </div>
+            <p class="text-xs text-gray-500 mb-6">💡 <strong>중요:</strong> 여기를 비워두면 CPM은 그 항목을 추가하지 않습니다. 즉, 값이 없으면 없는 그대로 전송됩니다.</p>
             <div class="space-y-2">
-                ${await renderInput('cpm_fallback_temp', 'Default Temperature (기본 온도, 비워두면 0.7)', 'number')}
-                ${await renderInput('cpm_fallback_max_tokens', 'Default Max Output Tokens (비워두면 메인모델 최대응답 설정 따름)', 'number')}
-                ${await renderInput('cpm_fallback_top_p', 'Default Top P (비워두면 API 기본값)', 'number')}
-                ${await renderInput('cpm_fallback_freq_pen', 'Default Frequency Penalty (비워두면 API 기본값)', 'number')}
-                ${await renderInput('cpm_fallback_pres_pen', 'Default Presence Penalty (비워두면 API 기본값)', 'number')}
+                ${await renderInput('cpm_fallback_temp', 'Default Temperature (기본 온도, 비워두면 미전송)', 'number')}
+                ${await renderInput('cpm_fallback_max_tokens', 'Default Max Output Tokens (비워두면 미전송)', 'number')}
+                ${await renderInput('cpm_fallback_top_p', 'Default Top P (기본 Top P, 비워두면 API 기본값)', 'number')}
+                ${await renderInput('cpm_fallback_freq_pen', 'Default Frequency Penalty (기본 빈도 페널티, 비워두면 API 기본값)', 'number')}
+                ${await renderInput('cpm_fallback_pres_pen', 'Default Presence Penalty (기본 존재 페널티, 비워두면 API 기본값)', 'number')}
             </div>
             <div class="mt-10 pt-6 border-t border-gray-700">
                 <h4 class="text-xl font-bold text-emerald-400 mb-4">🔄 스트리밍 설정 (Streaming)</h4>

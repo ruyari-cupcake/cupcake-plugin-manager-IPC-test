@@ -1,7 +1,7 @@
 //@api 3.0
 //@name CPM Provider - Gemini
 //@display-name CPM Provider - Gemini
-//@version 2.0.5
+//@version 2.0.6
 //@description Google AI Studio Gemini provider (IPC)
 //@icon 💎
 //@author Cupcake

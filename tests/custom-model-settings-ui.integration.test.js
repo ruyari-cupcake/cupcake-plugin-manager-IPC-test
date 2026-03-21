@@ -98,7 +98,7 @@ async function loadManagerSettings(overrides = {}) {
     await vi.advanceTimersByTimeAsync(1100);
     await flushMicrotasks();
 
-    const mainSetting = settings.find((entry) => entry.label === 'v2.0.5');
+    const mainSetting = settings.find((entry) => entry.label === 'v2.0.6');
     expect(mainSetting).toBeTruthy();
 
     await mainSetting.callback(overrides.initialTab || 'tab-customs');

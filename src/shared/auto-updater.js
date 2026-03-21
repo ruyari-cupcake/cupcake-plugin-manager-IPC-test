@@ -792,15 +792,33 @@ export function createAutoUpdater(deps) {
             const cacheBuster = versionsUrl + '?_t=' + Date.now();
             console.log(`[CPM AutoCheck] Fetching version manifest...`);
 
-            const fetchPromise = Risu.risuFetch(cacheBuster, { method: 'GET', plainFetchForce: true });
-            const result = await _withTimeout(fetchPromise, 15000, 'Version manifest fetch timed out (15s)');
-
-            if (!result.data || (result.status && result.status >= 400)) {
-                console.warn(`[CPM AutoCheck] Fetch failed (status=${result.status}), silently skipped.`);
-                return;
+            // Use nativeFetch to bypass CORS restrictions on GitHub raw URLs
+            let rawManifest;
+            try {
+                const nfRes = await _withTimeout(
+                    Risu.nativeFetch(cacheBuster, { method: 'GET' }),
+                    15000, 'Version manifest fetch timed out (15s)'
+                );
+                if (!nfRes.ok) throw new Error(`nativeFetch status ${nfRes.status}`);
+                const manifestText = await nfRes.text();
+                rawManifest = JSON.parse(manifestText);
+            } catch (nfErr) {
+                // Fallback to risuFetch
+                try {
+                    const result = await _withTimeout(
+                        Risu.risuFetch(cacheBuster, { method: 'GET', plainFetchForce: true }),
+                        15000, 'Version manifest risuFetch timed out (15s)'
+                    );
+                    if (!result.data || (result.status && result.status >= 400)) {
+                        console.warn(`[CPM AutoCheck] Fetch failed (status=${result.status}), silently skipped.`);
+                        return;
+                    }
+                    rawManifest = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
+                } catch (rfErr) {
+                    console.warn(`[CPM AutoCheck] Both nativeFetch and risuFetch failed, silently skipped.`);
+                    return;
+                }
             }
-
-            const rawManifest = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
             if (!rawManifest || typeof rawManifest !== 'object') return;
 
             // Support both formats: { versions: { ... }, code: ... } or flat { PluginName: { version } }
